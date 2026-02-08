@@ -1,0 +1,3533 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="description" content="Powerflow - Fitness et Habitudes">
+    <meta name="theme-color" content="#1f2937">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <title>Powerflow</title>
+    
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/lucide@0.294.0/dist/umd/lucide.js"></script>
+    
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+            background: #111827;
+            color: white;
+            overscroll-behavior-y: contain;
+        }
+        #root { min-height: 100vh; }
+        ::-webkit-scrollbar { width: 0; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+    
+    <script type="text/babel">
+// Powerflow - Application de fitness et gestion d'habitudes
+// Compatible navigateur - utilise React et Lucide depuis CDN
+
+const { useState, useEffect } = React;
+const { 
+  Play, Pause, RotateCcw, CheckCircle, Calendar, User, Dumbbell, Heart, 
+  Flower2, ChevronDown, ChevronUp, Plus, Edit, Trash2, Settings, ArrowLeft, 
+  Save, X, Clock, Coffee, Brain, Target, TrendingUp, Award, Menu
+} = lucide;
+
+// ============================================
+// DATA MODELS & INITIAL STATE
+// ============================================
+
+const getInitialData = () => ({
+  // EXERCISES - Building blocks for body workouts
+  exercises: [],
+  
+  // WORKOUTS - Collections of exercises
+  workouts: [],
+  
+  // BODY CYCLE - Sequence of workouts with optional rest days
+  bodyCycle: {
+    id: 'main-cycle',
+    name: 'Cycle Principal',
+    active: true,
+    currentPosition: 0,
+    lastCompletedDate: null, // Date de la dernière séance complétée (format ISO)
+    sequence: [] // { type: 'workout', id: 'xxx' } ou { type: 'rest', id: 'xxx', name: 'Repos', optional: true/false }
+  },
+  
+  // MIND EXERCISES - Building blocks for mind habits
+  mindExercises: [],
+  
+  // MIND HABITS - Daily practices with progression
+  mindHabits: [],
+  
+  // TASK QUEUE - Tasks for today (auto-generated + carried over)
+  todayTasks: [],
+  
+  // HISTORY - Completed sessions
+  history: []
+});
+
+function PowerflowApp() {
+  // ============================================
+  // STATE MANAGEMENT
+  // ============================================
+  
+  const [data, setData] = useState(() => {
+    const saved = localStorage.getItem('powerflow-data');
+    let loadedData = saved ? JSON.parse(saved) : getInitialData();
+    
+    // Migration: ajouter frequency aux workouts qui n'en ont pas
+    if (loadedData.workouts) {
+      loadedData.workouts = loadedData.workouts.map(w => ({
+        ...w,
+        frequency: w.frequency || {
+          type: 'cycle',
+          interval: null,
+          weekdays: [],
+          lastCompleted: null
+        }
+      }));
+    }
+    
+    // Migration: convertir timingType vers type pour mindExercises
+    if (loadedData.mindExercises) {
+      loadedData.mindExercises = loadedData.mindExercises.map(e => ({
+        ...e,
+        type: e.type || (e.timingType === '0tox' ? 'chrono' : 'chrono')
+      }));
+    }
+    
+    // Migration: convertir timingType vers type pour mindHabits
+    if (loadedData.mindHabits) {
+      loadedData.mindHabits = loadedData.mindHabits.map(h => {
+        const habit = {
+          ...h,
+          type: h.type || (h.timingType === '0tox' ? 'chrono' : 'chrono')
+        };
+        
+        // Si l'habitude n'a pas de sourceExerciseId, essayer de le trouver
+        if (!habit.sourceExerciseId && loadedData.mindExercises) {
+          const matchingExercise = loadedData.mindExercises.find(e => 
+            e.name === habit.name && e.type === habit.type
+          );
+          if (matchingExercise) {
+            habit.sourceExerciseId = matchingExercise.id;
+          }
+        }
+        
+        return habit;
+      });
+    }
+    
+    return loadedData;
+  });
+  
+  // Save to localStorage whenever data changes
+  useEffect(() => {
+    localStorage.setItem('powerflow-data', JSON.stringify(data));
+  }, [data]);
+  
+  // Navigation
+  const [currentView, setCurrentView] = useState('dashboard'); 
+  // Views: dashboard, workout-execution, habit-execution, history, settings, library, mind-library, workout-editor
+  
+  // Workout execution state
+  const [activeWorkout, setActiveWorkout] = useState(null);
+  const [currentExerciseIndex, setCurrentExerciseIndex] = useState(0);
+  const [isInRestPeriod, setIsInRestPeriod] = useState(false);
+  const [exerciseData, setExerciseData] = useState({});
+  const [timer, setTimer] = useState(0);
+  const [isTimerRunning, setIsTimerRunning] = useState(false);
+  const [repsInput, setRepsInput] = useState('');
+  const [showOverview, setShowOverview] = useState(false);
+  
+  // Habit execution state
+  const [activeHabit, setActiveHabit] = useState(null);
+  const [habitTimer, setHabitTimer] = useState(0);
+  const [isHabitTimerRunning, setIsHabitTimerRunning] = useState(false);
+  
+  // Drag and drop state
+  const [draggedCycleIndex, setDraggedCycleIndex] = useState(null);
+  const [draggedExerciseIndex, setDraggedExerciseIndex] = useState(null);
+  const [draggedMindExercise, setDraggedMindExercise] = useState(null);
+  
+  // Workout editor state
+  const [editingWorkout, setEditingWorkout] = useState(null);
+  const [editingExerciseRest, setEditingExerciseRest] = useState(null);
+  const [showWorkoutCustomization, setShowWorkoutCustomization] = useState(false);
+  const [exerciseFilterInEditor, setExerciseFilterInEditor] = useState({
+    category: 'all',
+    search: ''
+  });
+  
+  // Exercise builder state
+  const [showExerciseBuilder, setShowExerciseBuilder] = useState(false);
+  const [editExercise, setEditExercise] = useState(null);
+  const [exerciseFormData, setExerciseFormData] = useState({
+    name: '',
+    category: 'Renforcement',
+    type: 'reps',
+    target: '',
+    duration: 0
+  });
+  
+  // Mind exercise builder state
+  const [showMindExerciseBuilder, setShowMindExerciseBuilder] = useState(false);
+  const [editMindExercise, setEditMindExercise] = useState(null);
+  const [mindExerciseFormData, setMindExerciseFormData] = useState({
+    name: '',
+    type: 'chrono', // 'chrono' = chronomètre (0tox), 'reps' = répétitions
+    target: '' // Objectif : nombre de reps OU durée en secondes
+  });
+  
+  // Rest day builder state
+  const [showRestBuilder, setShowRestBuilder] = useState(false);
+  const [restFormData, setRestFormData] = useState({
+    name: 'Repos',
+    optional: true
+  });
+  
+  // Delete workout confirmation state
+  const [showDeleteWorkoutConfirm, setShowDeleteWorkoutConfirm] = useState(false);
+  const [workoutToDelete, setWorkoutToDelete] = useState(null);
+  
+  // Delete mind exercise confirmation state
+  const [showDeleteMindExerciseConfirm, setShowDeleteMindExerciseConfirm] = useState(false);
+  const [mindExerciseToDelete, setMindExerciseToDelete] = useState(null);
+  
+  // Delete mind habit confirmation state
+  const [showDeleteHabitConfirm, setShowDeleteHabitConfirm] = useState(false);
+  const [habitToDelete, setHabitToDelete] = useState(null);
+  
+  // Edit mind habit state
+  const [showEditHabitModal, setShowEditHabitModal] = useState(false);
+  const [editingHabit, setEditingHabit] = useState(null);
+  
+  // Delete history entry confirmation state
+  const [showDeleteHistoryConfirm, setShowDeleteHistoryConfirm] = useState(false);
+  const [historyEntryToDelete, setHistoryEntryToDelete] = useState(null);
+  
+  // Abandon workout confirmation state
+  const [showAbandonWorkoutConfirm, setShowAbandonWorkoutConfirm] = useState(false);
+  
+  // Remove from cycle confirmation state
+  const [showRemoveFromCycleConfirm, setShowRemoveFromCycleConfirm] = useState(false);
+  const [cycleIndexToRemove, setCycleIndexToRemove] = useState(null);
+  
+  // Debug mode - Pour simuler le passage du temps
+  const [debugMode, setDebugMode] = useState(false);
+  const [simulatedDate, setSimulatedDate] = useState(null);
+  
+  // Fonction pour obtenir la date actuelle (réelle ou simulée)
+  const getCurrentDate = () => {
+    return simulatedDate ? new Date(simulatedDate) : new Date();
+  };
+  
+  // Workout selector state
+  const [showWorkoutSelector, setShowWorkoutSelector] = useState(false);
+  
+  // Icon and color selection
+  const availableIcons = [
+    { name: 'dumbbell', icon: Dumbbell, label: 'Haltère' },
+    { name: 'heart', icon: Heart, label: 'Cardio' },
+    { name: 'flower', icon: Flower2, label: 'Mobilité' },
+    { name: 'target', icon: Target, label: 'Cible' },
+    { name: 'trending', icon: TrendingUp, label: 'Performance' },
+    { name: 'award', icon: Award, label: 'Défi' }
+  ];
+  
+  const availableColors = [
+    { name: 'bg-blue-500', label: 'Bleu' },
+    { name: 'bg-red-500', label: 'Rouge' },
+    { name: 'bg-green-500', label: 'Vert' },
+    { name: 'bg-purple-500', label: 'Violet' },
+    { name: 'bg-orange-500', label: 'Orange' },
+    { name: 'bg-pink-500', label: 'Rose' },
+    { name: 'bg-yellow-500', label: 'Jaune' },
+    { name: 'bg-indigo-500', label: 'Indigo' }
+  ];
+
+  // ============================================
+  // HELPER FUNCTIONS
+  // ============================================
+  
+  const isSameDay = (date1, date2) => {
+    if (!date1 || !date2) return false;
+    const d1 = new Date(date1);
+    const d2 = new Date(date2);
+    return d1.getFullYear() === d2.getFullYear() &&
+           d1.getMonth() === d2.getMonth() &&
+           d1.getDate() === d2.getDate();
+  };
+  
+  const isCompletedToday = (lastCompletedDate) => {
+    return isSameDay(lastCompletedDate, getCurrentDate());
+  };
+  
+  const getDaysLate = (lastCompletedDate) => {
+    if (!lastCompletedDate) return 0;
+    const today = getCurrentDate();
+    today.setHours(0, 0, 0, 0);
+    const lastCompleted = new Date(lastCompletedDate);
+    lastCompleted.setHours(0, 0, 0, 0);
+    const diffTime = today - lastCompleted;
+    const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+    return Math.max(0, diffDays - 1); // -1 car le jour suivant n'est pas encore en retard
+  };
+  
+  const getLastPerformance = (workoutId, exerciseId, exerciseIndex) => {
+    // Chercher la dernière séance de ce workout dans l'historique
+    const lastWorkoutSession = data.history
+      .filter(h => h.type === 'body' && h.workoutId === workoutId)
+      .sort((a, b) => new Date(b.date) - new Date(a.date))[0];
+    
+    if (!lastWorkoutSession || !lastWorkoutSession.exercises) return null;
+    
+    // Chercher la performance pour cette position d'exercice (exerciseId-index)
+    const uniqueKey = `${exerciseId}-${exerciseIndex}`;
+    return lastWorkoutSession.exercises[uniqueKey] || null;
+  };
+  
+  const getLastHabitPerformance = (habitId) => {
+    // Chercher la dernière séance de cette habitude dans l'historique
+    const lastHabitSession = data.history
+      .filter(h => h.type === 'mind' && h.habitId === habitId)
+      .sort((a, b) => new Date(b.date) - new Date(a.date))[0];
+    
+    return lastHabitSession || null;
+  };
+  
+  const isWorkoutScheduledToday = (workout) => {
+    if (!workout.frequency) return false;
+    
+    // Si déjà complété aujourd'hui, on l'affiche quand même mais grisé
+    // (la logique de grisage est gérée dans le render)
+    
+    const today = getCurrentDate();
+    const dayOfWeek = today.getDay(); // 0 = dimanche, 1 = lundi, etc.
+    
+    // Type: Cycle - géré séparément dans le cycle
+    if (workout.frequency.type === 'cycle') {
+      return false; // Les workouts du cycle sont affichés via le système de cycle
+    }
+    
+    // Type: Jours de la semaine
+    if (workout.frequency.type === 'weekdays') {
+      // Toujours afficher si c'est un jour programmé (même si complété aujourd'hui)
+      return workout.frequency.weekdays?.includes(dayOfWeek) || false;
+    }
+    
+    // Type: Récurrence (tous les X jours)
+    if (workout.frequency.type === 'interval') {
+      const lastCompleted = workout.frequency.lastCompleted;
+      
+      // Si jamais fait, montrer aujourd'hui
+      if (!lastCompleted) return true;
+      
+      const lastDate = new Date(lastCompleted);
+      lastDate.setHours(0, 0, 0, 0);
+      const todayCopy = new Date(today);
+      todayCopy.setHours(0, 0, 0, 0);
+      
+      const daysSinceLastCompleted = Math.floor((todayCopy - lastDate) / (1000 * 60 * 60 * 24));
+      const interval = workout.frequency.interval || 1;
+      
+      // Afficher si c'est le jour prévu OU si déjà fait aujourd'hui (pour montrer grisé)
+      // daysSinceLastCompleted === 0 signifie "fait aujourd'hui" → on affiche quand même
+      return daysSinceLastCompleted >= interval || daysSinceLastCompleted === 0;
+    }
+    
+    return false;
+  };
+  
+  const formatTime = (seconds) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  };
+  
+  const getWorkoutById = (id) => {
+    return data.workouts.find(w => w.id === id);
+  };
+  
+  const getExerciseById = (id) => {
+    return data.exercises.find(e => e.id === id);
+  };
+  
+  const getMindExerciseById = (id) => {
+    return data.mindExercises.find(e => e.id === id);
+  };
+  
+  const getMindHabitById = (id) => {
+    return data.mindHabits.find(h => h.id === id);
+  };
+  
+  const getIconComponent = (iconName) => {
+    const iconObj = availableIcons.find(i => i.name === iconName);
+    return iconObj ? iconObj.icon : Dumbbell;
+  };
+
+  // ============================================
+  // CYCLE MANAGEMENT - DRAG & DROP
+  // ============================================
+  
+  const handleCycleDragStart = (index) => {
+    setDraggedCycleIndex(index);
+  };
+  
+  const handleCycleDragOver = (e, index) => {
+    e.preventDefault();
+    if (draggedCycleIndex === null || draggedCycleIndex === index) return;
+    
+    const newSequence = [...data.bodyCycle.sequence];
+    const draggedItem = newSequence[draggedCycleIndex];
+    newSequence.splice(draggedCycleIndex, 1);
+    newSequence.splice(index, 0, draggedItem);
+    
+    setData(prev => ({
+      ...prev,
+      bodyCycle: {
+        ...prev.bodyCycle,
+        sequence: newSequence,
+        // Réinitialiser lastCompletedDate pour que le nouvel ordre s'affiche immédiatement
+        lastCompletedDate: null
+      }
+    }));
+    
+    setDraggedCycleIndex(index);
+  };
+  
+  const handleCycleDragEnd = () => {
+    setDraggedCycleIndex(null);
+  };
+
+  // ============================================
+  // EXERCISE DRAG & DROP IN WORKOUT EDITOR
+  // ============================================
+  
+  const handleExerciseDragStart = (index) => {
+    setDraggedExerciseIndex(index);
+  };
+  
+  const handleExerciseDragOver = (e, index) => {
+    e.preventDefault();
+    if (draggedExerciseIndex === null || draggedExerciseIndex === index) return;
+    
+    const workout = getWorkoutById(editingWorkout);
+    if (!workout) return;
+    
+    const newExercises = [...workout.exercises];
+    const draggedItem = newExercises[draggedExerciseIndex];
+    newExercises.splice(draggedExerciseIndex, 1);
+    newExercises.splice(index, 0, draggedItem);
+    
+    setData(prev => ({
+      ...prev,
+      workouts: prev.workouts.map(w =>
+        w.id === editingWorkout ? { ...w, exercises: newExercises } : w
+      )
+    }));
+    
+    setDraggedExerciseIndex(index);
+  };
+  
+  const handleExerciseDragEnd = () => {
+    setDraggedExerciseIndex(null);
+  };
+
+  // ============================================
+  // EXERCISE BUILDER
+  // ============================================
+  
+  const openExerciseBuilder = (exercise = null) => {
+    if (exercise) {
+      setEditExercise(exercise.id);
+      setExerciseFormData({ 
+        name: exercise.name,
+        category: exercise.category,
+        type: exercise.type,
+        target: exercise.target,
+        duration: exercise.duration || 0
+      });
+    } else {
+      setEditExercise(null);
+      setExerciseFormData({
+        name: '',
+        category: 'Renforcement',
+        type: 'reps',
+        target: '',
+        duration: 0
+      });
+    }
+    setShowExerciseBuilder(true);
+  };
+  
+  const saveExercise = () => {
+    if (!exerciseFormData.name.trim()) {
+      alert('Le nom de l\'exercice est obligatoire');
+      return;
+    }
+    
+    if (editExercise) {
+      // Edit existing
+      setData(prev => ({
+        ...prev,
+        exercises: prev.exercises.map(e =>
+          e.id === editExercise ? { ...exerciseFormData, id: editExercise } : e
+        )
+      }));
+    } else {
+      // Create new
+      const newExercise = {
+        ...exerciseFormData,
+        id: `ex-${Date.now()}`
+      };
+      setData(prev => ({
+        ...prev,
+        exercises: [...prev.exercises, newExercise]
+      }));
+    }
+    
+    setShowExerciseBuilder(false);
+  };
+  
+  const deleteExercise = (id) => {
+    if (!confirm('Supprimer cet exercice ? Il sera retiré de tous les entraînements.')) return;
+    
+    setData(prev => ({
+      ...prev,
+      exercises: prev.exercises.filter(e => e.id !== id),
+      workouts: prev.workouts.map(w => ({
+        ...w,
+        exercises: w.exercises.filter(exId => exId !== id)
+      }))
+    }));
+  };
+
+  // ============================================
+  // MIND EXERCISE BUILDER
+  // ============================================
+  
+  const openMindExerciseBuilder = (exercise = null) => {
+    if (exercise) {
+      setEditMindExercise(exercise.id);
+      setMindExerciseFormData({ 
+        name: exercise.name,
+        type: exercise.type || 'chrono',
+        target: exercise.target || ''
+      });
+    } else {
+      setEditMindExercise(null);
+      setMindExerciseFormData({
+        name: '',
+        type: 'chrono',
+        target: ''
+      });
+    }
+    setShowMindExerciseBuilder(true);
+  };
+  
+  const saveMindExercise = () => {
+    if (!mindExerciseFormData.name.trim()) {
+      alert('Le nom de l\'exercice est obligatoire');
+      return;
+    }
+    
+    if (editMindExercise) {
+      setData(prev => {
+        const newData = {
+          ...prev,
+          mindExercises: prev.mindExercises.map(e =>
+            e.id === editMindExercise ? { ...mindExerciseFormData, id: editMindExercise } : e
+          )
+        };
+        
+        // Mettre à jour toutes les habitudes qui utilisent cet exercice
+        newData.mindHabits = prev.mindHabits.map(h =>
+          h.sourceExerciseId === editMindExercise
+            ? {
+                ...h,
+                name: mindExerciseFormData.name,
+                type: mindExerciseFormData.type,
+                target: mindExerciseFormData.target
+              }
+            : h
+        );
+        
+        return newData;
+      });
+    } else {
+      const newExercise = {
+        ...mindExerciseFormData,
+        id: `mind-ex-${Date.now()}`
+      };
+      setData(prev => ({
+        ...prev,
+        mindExercises: [...prev.mindExercises, newExercise]
+      }));
+    }
+    
+    setShowMindExerciseBuilder(false);
+  };
+  
+  const deleteMindExercise = (id) => {
+    setData(prev => ({
+      ...prev,
+      mindExercises: prev.mindExercises.filter(e => e.id !== id)
+    }));
+    
+    setShowDeleteMindExerciseConfirm(false);
+    setMindExerciseToDelete(null);
+  };
+  
+  const createHabitFromExercise = (exerciseId) => {
+    const exercise = getMindExerciseById(exerciseId);
+    if (!exercise) return;
+    
+    const newHabit = {
+      id: `habit-${Date.now()}`,
+      sourceExerciseId: exerciseId, // Lien vers l'exercice source
+      name: exercise.name,
+      icon: 'brain',
+      color: 'bg-purple-500',
+      frequency: 'daily',
+      days: [],
+      type: exercise.type, // 'chrono' ou 'reps'
+      target: exercise.target || '', // Objectif de l'exercice
+      lastCompletedDate: null, // Date de dernière complétion
+      progression: {
+        enabled: false,
+        type: 'weekly',
+        change: 300
+      },
+      active: true
+    };
+    
+    setData(prev => ({
+      ...prev,
+      mindHabits: [...prev.mindHabits, newHabit]
+    }));
+    
+    alert(`Habitude "${exercise.name}" créée !`);
+  };
+
+  // ============================================
+  // WORKOUT MANAGEMENT
+  // ============================================
+  
+  const createNewWorkout = () => {
+    const newWorkout = {
+      id: `workout-${Date.now()}`,
+      name: 'Nouvel entraînement',
+      icon: 'dumbbell',
+      color: 'bg-blue-500',
+      exercises: [],
+      restBetweenExercises: {},
+      frequency: {
+        type: 'cycle',      // 'cycle', 'interval', 'weekdays'
+        interval: null,     // Pour 'interval': 1-7 jours
+        weekdays: [],       // Pour 'weekdays': [0-6] (dimanche=0, lundi=1, etc.)
+        lastCompleted: null // Date de dernière complétion pour calculer la récurrence
+      }
+    };
+    
+    setData(prev => ({
+      ...prev,
+      workouts: [...prev.workouts, newWorkout]
+    }));
+    
+    setEditingWorkout(newWorkout.id);
+    setCurrentView('workout-editor');
+  };
+  
+  const deleteWorkout = (id) => {
+    setData(prev => ({
+      ...prev,
+      workouts: prev.workouts.filter(w => w.id !== id),
+      bodyCycle: {
+        ...prev.bodyCycle,
+        sequence: prev.bodyCycle.sequence.filter(s => s.type !== 'workout' || s.id !== id)
+      }
+    }));
+    
+    if (editingWorkout === id) {
+      setCurrentView('settings');
+      setEditingWorkout(null);
+    }
+    
+    setShowDeleteWorkoutConfirm(false);
+    setWorkoutToDelete(null);
+  };
+  
+  const addWorkoutToCycle = (workoutId) => {
+    setData(prev => ({
+      ...prev,
+      bodyCycle: {
+        ...prev.bodyCycle,
+        sequence: [
+          ...prev.bodyCycle.sequence,
+          { type: 'workout', id: workoutId }
+        ]
+      }
+    }));
+    setShowWorkoutSelector(false);
+  };
+  
+  const removeFromCycle = (index) => {
+    setCycleIndexToRemove(index);
+    setShowRemoveFromCycleConfirm(true);
+  };
+
+  // ============================================
+  // REST DAY MANAGEMENT
+  // ============================================
+  
+  const createRestDay = () => {
+    if (!restFormData.name.trim()) {
+      alert('Le nom du repos est obligatoire');
+      return;
+    }
+    
+    const newRest = {
+      type: 'rest',
+      id: `rest-${Date.now()}`,
+      name: restFormData.name,
+      optional: restFormData.optional
+    };
+    
+    setData(prev => ({
+      ...prev,
+      bodyCycle: {
+        ...prev.bodyCycle,
+        sequence: [...prev.bodyCycle.sequence, newRest]
+      }
+    }));
+    
+    setShowRestBuilder(false);
+    setRestFormData({ name: 'Repos', optional: true });
+  };
+
+  // ============================================
+  // WORKOUT EXECUTION
+  // ============================================
+  
+  const startWorkout = (workoutId) => {
+    const workout = getWorkoutById(workoutId);
+    if (!workout || workout.exercises.length === 0) {
+      alert('Cet entraînement ne contient aucun exercice');
+      return;
+    }
+    
+    setActiveWorkout(workout);
+    setCurrentExerciseIndex(0);
+    setExerciseData({});
+    setTimer(0);
+    setIsTimerRunning(false);
+    setIsInRestPeriod(false);
+    setRepsInput('');
+    setShowOverview(false);
+    setCurrentView('workout-execution');
+  };
+  
+  const completeExercise = () => {
+    const workout = activeWorkout;
+    const exerciseId = workout.exercises[currentExerciseIndex];
+    const exercise = getExerciseById(exerciseId);
+    
+    if (!exercise) return;
+    
+    // Save exercise data - utiliser exerciseId + index pour supporter les exercices répétés
+    const uniqueKey = `${exerciseId}-${currentExerciseIndex}`;
+    const newExerciseData = {
+      ...exerciseData,
+      [uniqueKey]: {
+        exerciseId,
+        index: currentExerciseIndex,
+        reps: exercise.type === 'reps' ? parseInt(repsInput) || 0 : null,
+        duration: exercise.type === 'timing' || exercise.type === 'chrono' ? timer : null,
+        completed: true
+      }
+    };
+    setExerciseData(newExerciseData);
+    
+    // Check if last exercise
+    if (currentExerciseIndex === workout.exercises.length - 1) {
+      // Workout complete!
+      completeWorkout(newExerciseData);
+    } else {
+      // Move to rest period
+      const restTime = workout.restBetweenExercises[currentExerciseIndex] || 60;
+      setTimer(restTime);
+      setIsTimerRunning(true); // Démarrer automatiquement le repos
+      setIsInRestPeriod(true); // Marquer qu'on est en période de repos
+      setCurrentExerciseIndex(currentExerciseIndex + 1);
+      setRepsInput('');
+    }
+  };
+  
+  const completeWorkout = (finalData) => {
+    const totalDuration = Object.values(finalData).reduce((sum, ex) => {
+      return sum + (ex.duration || 0);
+    }, 0);
+    
+    const historyEntry = {
+      id: `history-${Date.now()}`,
+      type: 'body',
+      workoutId: activeWorkout.id,
+      workoutName: activeWorkout.name,
+      date: new Date().toISOString(),
+      duration: totalDuration,
+      exercises: finalData,
+      feeling: '' // Can add later
+    };
+    
+    const completionDate = new Date().toISOString();
+    
+    setData(prev => {
+      const newData = {
+        ...prev,
+        history: [...prev.history, historyEntry],
+        // Mettre à jour lastCompleted pour le workout concerné
+        workouts: prev.workouts.map(w =>
+          w.id === activeWorkout.id
+            ? {
+                ...w,
+                frequency: {
+                  ...w.frequency,
+                  lastCompleted: completionDate
+                }
+              }
+            : w
+        )
+      };
+      
+      // Si c'est un workout du cycle, mettre à jour bodyCycle.lastCompletedDate
+      if (activeWorkout.frequency?.type === 'cycle') {
+        newData.bodyCycle = {
+          ...prev.bodyCycle,
+          lastCompletedDate: completionDate
+        };
+      }
+      
+      return newData;
+    });
+    
+    alert('🎉 Entraînement terminé !');
+    setCurrentView('dashboard');
+    setActiveWorkout(null);
+    setIsInRestPeriod(false);
+  };
+  
+  const skipExercise = () => {
+    if (!confirm('Passer cet exercice ?')) return;
+    
+    if (currentExerciseIndex === activeWorkout.exercises.length - 1) {
+      completeWorkout(exerciseData);
+    } else {
+      setCurrentExerciseIndex(currentExerciseIndex + 1);
+      setRepsInput('');
+      setTimer(0);
+      setIsTimerRunning(false);
+    }
+  };
+
+  // ============================================
+  // TIMER EFFECTS
+  // ============================================
+  
+  // Initialize timer with exercise duration when changing exercise
+  useEffect(() => {
+    if (activeWorkout && !isInRestPeriod) {
+      const exerciseId = activeWorkout.exercises[currentExerciseIndex];
+      const exercise = getExerciseById(exerciseId);
+      
+      // For timing exercises, set timer to the exercise duration and start automatically
+      if (exercise?.type === 'timing' && exercise.duration) {
+        setTimer(exercise.duration);
+        setIsTimerRunning(true); // Démarrer automatiquement les exercices timing
+      } else if (exercise?.type === 'chrono') {
+        setTimer(0);
+        setIsTimerRunning(false); // Les chrono ne démarrent pas automatiquement
+      } else if (exercise?.type === 'reps') {
+        setTimer(0);
+        setIsTimerRunning(false);
+      }
+    }
+  }, [activeWorkout, currentExerciseIndex, isInRestPeriod]);
+  
+  useEffect(() => {
+    let interval;
+    if (isTimerRunning && activeWorkout) {
+      const exerciseId = activeWorkout.exercises[currentExerciseIndex];
+      const exercise = getExerciseById(exerciseId);
+      
+      interval = setInterval(() => {
+        setTimer(prev => {
+          // Si on est en repos, toujours décrémenter (compte à rebours)
+          if (isInRestPeriod) {
+            if (prev <= 1) {
+              setIsTimerRunning(false);
+              setIsInRestPeriod(false);
+              return 0;
+            }
+            return prev - 1;
+          }
+          
+          // Pour les exercices de type chrono, on incrémente (compte vers le haut)
+          if (exercise?.type === 'chrono') {
+            return prev + 1;
+          }
+          
+          // Pour les autres types d'exercices (timing, reps), on décrémente
+          if (prev <= 1) {
+            setIsTimerRunning(false);
+            return 0;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+    }
+    return () => clearInterval(interval);
+  }, [isTimerRunning, activeWorkout, currentExerciseIndex, isInRestPeriod]);
+  
+  useEffect(() => {
+    let interval;
+    if (isHabitTimerRunning && activeHabit && activeHabit.type === 'chrono') {
+      interval = setInterval(() => {
+        setHabitTimer(prev => prev + 1);
+      }, 1000);
+    }
+    return () => clearInterval(interval);
+  }, [isHabitTimerRunning, activeHabit]);
+  
+  // Auto-advance cycle on day change
+  useEffect(() => {
+    // Ne pas auto-avancer en mode debug pour éviter de modifier les vraies données
+    if (debugMode) return;
+    
+    const checkAndAdvanceCycle = () => {
+      const lastCompleted = data.bodyCycle.lastCompletedDate;
+      if (!lastCompleted) return; // Pas encore de séance complétée
+      
+      const lastDate = new Date(lastCompleted);
+      const today = new Date();
+      
+      // Reset time part for comparison
+      lastDate.setHours(0, 0, 0, 0);
+      today.setHours(0, 0, 0, 0);
+      
+      // Si la dernière séance était hier ou avant, avancer le cycle
+      if (lastDate < today && data.bodyCycle.sequence.length > 0) {
+        setData(prev => ({
+          ...prev,
+          bodyCycle: {
+            ...prev.bodyCycle,
+            currentPosition: (prev.bodyCycle.currentPosition + 1) % prev.bodyCycle.sequence.length
+          }
+        }));
+      }
+    };
+    
+    // Check immediately on mount
+    checkAndAdvanceCycle();
+    
+    // Check every hour in case the day changes while app is open
+    const interval = setInterval(checkAndAdvanceCycle, 60 * 60 * 1000);
+    
+    return () => clearInterval(interval);
+  }, [data.bodyCycle.lastCompletedDate, data.bodyCycle.sequence.length, debugMode]);
+
+  // ============================================
+  // REST DAY LOGIC
+  // ============================================
+  
+  const handleRestDay = (take) => {
+    if (take) {
+      // Take the rest - enregistrer comme complété
+      setData(prev => ({
+        ...prev,
+        bodyCycle: {
+          ...prev.bodyCycle,
+          lastCompletedDate: new Date().toISOString(),
+          currentPosition: (prev.bodyCycle.currentPosition + 1) % prev.bodyCycle.sequence.length
+        }
+      }));
+      alert('Bon repos ! 😴');
+    } else {
+      // Skip rest (only for optional rest) - passer au suivant sans enregistrer de date
+      const nextPosition = (data.bodyCycle.currentPosition + 1) % data.bodyCycle.sequence.length;
+      setData(prev => ({
+        ...prev,
+        bodyCycle: {
+          ...prev.bodyCycle,
+          currentPosition: nextPosition
+        }
+      }));
+    }
+  };
+
+  // ============================================
+  // RENDER HELPERS
+  // ============================================
+  
+  const renderDashboard = () => {
+    const currentStep = data.bodyCycle.sequence[data.bodyCycle.currentPosition];
+    const isBodyCompletedToday = isCompletedToday(data.bodyCycle.lastCompletedDate);
+    const daysLate = getDaysLate(data.bodyCycle.lastCompletedDate);
+    
+    return (
+      <div className="space-y-6">
+        <h1 className="text-3xl font-bold">Powerflow</h1>
+        <p className="text-gray-400">
+          Aujourd'hui, {getCurrentDate().toLocaleDateString('fr-FR', { 
+            weekday: 'long', 
+            day: '2-digit', 
+            month: 'long', 
+            year: 'numeric' 
+          })} • {getCurrentDate().toLocaleTimeString('fr-FR', {
+            hour: '2-digit',
+            minute: '2-digit'
+          })}
+        </p>
+        
+        {/* Debug Mode Panel */}
+        {debugMode && (
+          <div className="bg-yellow-500/20 border-2 border-yellow-500 rounded-xl p-4">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="font-bold text-yellow-300">🧪 Mode Debug - Simulation du temps</h3>
+              <button
+                onClick={() => {
+                  setDebugMode(false);
+                  setSimulatedDate(null);
+                }}
+                className="text-xs bg-yellow-500/30 hover:bg-yellow-500/50 rounded px-2 py-1"
+              >
+                Désactiver
+              </button>
+            </div>
+            
+            <div className="bg-yellow-500/10 rounded p-2 mb-3 text-xs">
+              <p className="text-yellow-200">
+                ⚠️ <strong>Mode lecture seule :</strong> L'auto-avancement du cycle est désactivé en mode debug.
+                Tu peux voir comment l'app s'affichera à cette date, mais les données ne sont pas modifiées automatiquement.
+              </p>
+            </div>
+            
+            <div className="flex gap-2 flex-wrap">
+              <button
+                onClick={() => {
+                  const tomorrow = new Date(getCurrentDate());
+                  tomorrow.setDate(tomorrow.getDate() + 1);
+                  setSimulatedDate(tomorrow.toISOString());
+                }}
+                className="bg-blue-500 hover:bg-blue-600 rounded px-3 py-2 text-sm font-bold"
+              >
+                ➡️ +1 jour
+              </button>
+              <button
+                onClick={() => {
+                  const in3days = new Date(getCurrentDate());
+                  in3days.setDate(in3days.getDate() + 3);
+                  setSimulatedDate(in3days.toISOString());
+                }}
+                className="bg-blue-500 hover:bg-blue-600 rounded px-3 py-2 text-sm font-bold"
+              >
+                ⏩ +3 jours
+              </button>
+              <button
+                onClick={() => {
+                  const nextWeek = new Date(getCurrentDate());
+                  nextWeek.setDate(nextWeek.getDate() + 7);
+                  setSimulatedDate(nextWeek.toISOString());
+                }}
+                className="bg-blue-500 hover:bg-blue-600 rounded px-3 py-2 text-sm font-bold"
+              >
+                ⏩ +1 semaine
+              </button>
+              <button
+                onClick={() => {
+                  setSimulatedDate(null);
+                }}
+                className="bg-gray-500 hover:bg-gray-600 rounded px-3 py-2 text-sm font-bold"
+              >
+                🔄 Réinitialiser
+              </button>
+            </div>
+            {simulatedDate && (
+              <p className="text-xs text-yellow-300 mt-2">
+                📅 Date simulée : {new Date(simulatedDate).toLocaleDateString('fr-FR', { 
+                  weekday: 'long', 
+                  day: '2-digit', 
+                  month: 'long', 
+                  year: 'numeric' 
+                })}
+              </p>
+            )}
+          </div>
+        )}
+        
+        {/* Bouton pour activer le debug mode */}
+        {!debugMode && (
+          <button
+            onClick={() => setDebugMode(true)}
+            className="text-xs opacity-30 hover:opacity-100 transition-opacity"
+          >
+            🧪 Activer mode debug
+          </button>
+        )}
+        
+        {/* Workout en pause */}
+        {activeWorkout && (
+          <div className="bg-orange-500/20 border-2 border-orange-500 rounded-xl p-6">
+            <h2 className="text-xl font-bold mb-2">⏸️ Entraînement en pause</h2>
+            <p className="text-lg font-semibold mb-1">{activeWorkout.name}</p>
+            <p className="text-sm opacity-75 mb-4">
+              Exercice {currentExerciseIndex + 1}/{activeWorkout.exercises.length}
+            </p>
+            <button
+              onClick={() => setCurrentView('workout-execution')}
+              className="w-full bg-orange-500 hover:bg-orange-600 rounded-lg p-3 font-bold transition-colors"
+            >
+              ▶️ Reprendre l'entraînement
+            </button>
+          </div>
+        )}
+        
+        {/* Today's Task - Body */}
+        <div className="bg-white/10 rounded-xl p-6">
+          <h2 className="text-xl font-bold mb-4">💪 Corps</h2>
+          
+          {/* Cycle Workout */}
+          {currentStep && currentStep.type === 'workout' && (
+            <div className="mb-4">
+              {(() => {
+                const workout = getWorkoutById(currentStep.id);
+                if (!workout) return <p>Entraînement introuvable</p>;
+                const IconComp = getIconComponent(workout.icon);
+                
+                if (isBodyCompletedToday) {
+                  // Séance terminée aujourd'hui - affichage grisé
+                  return (
+                    <div className="bg-white/5 rounded-lg p-4 opacity-60">
+                      <div className="flex items-center gap-3 mb-3">
+                        <IconComp size={32} />
+                        <div className="flex-1">
+                          <h3 className="text-xl font-bold">{workout.name}</h3>
+                          <p className="text-xs opacity-75 mt-1">🔄 Cycle</p>
+                          <p className="text-sm text-green-400 mt-1">✓ Fait aujourd'hui</p>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                }
+                
+                // Séance non terminée - affichage normal avec bouton
+                return (
+                  <div>
+                    <div className={`${workout.color} rounded-lg p-4`}>
+                      <div className="flex items-center gap-3 mb-3">
+                        <IconComp size={32} />
+                        <div className="flex-1">
+                          <h3 className="text-xl font-bold">{workout.name}</h3>
+                          <p className="text-xs opacity-75">🔄 Cycle</p>
+                        </div>
+                      </div>
+                      <p className="text-sm opacity-75 mb-4">
+                        {workout.exercises.length} exercice{workout.exercises.length > 1 ? 's' : ''}
+                      </p>
+                      {!activeWorkout && (
+                        <button
+                          onClick={() => startWorkout(workout.id)}
+                          className="w-full bg-white/20 hover:bg-white/30 rounded-lg p-3 font-bold transition-colors"
+                        >
+                          Commencer l'entraînement
+                        </button>
+                      )}
+                      {activeWorkout && activeWorkout.id === workout.id && (
+                        <div className="bg-orange-500/20 rounded-lg p-3 text-center">
+                          <p className="text-sm text-orange-300">⏸️ En pause</p>
+                        </div>
+                      )}
+                      {activeWorkout && activeWorkout.id !== workout.id && (
+                        <div className="bg-white/5 rounded-lg p-3 text-center">
+                          <p className="text-sm opacity-50">Un autre entraînement est en cours</p>
+                        </div>
+                      )}
+                    </div>
+                    {daysLate > 0 && (
+                      <div className="mt-2 text-center">
+                        <p className="text-sm text-orange-400">⚠️ {daysLate} jour{daysLate > 1 ? 's' : ''} de retard</p>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+            </div>
+          )}
+          
+          {/* Scheduled Workouts - Récurrence et Jours de la semaine */}
+          {(() => {
+            const scheduledWorkouts = data.workouts.filter(w => isWorkoutScheduledToday(w));
+            
+            if (scheduledWorkouts.length === 0 && !currentStep) {
+              return <p className="text-sm opacity-75">Aucun entraînement aujourd'hui</p>;
+            }
+            
+            return (
+              <div className="space-y-3">
+                {scheduledWorkouts.map(workout => {
+                  const IconComp = getIconComponent(workout.icon);
+                  const isCompleted = isCompletedToday(workout.frequency?.lastCompleted);
+                  
+                  if (isCompleted) {
+                    // Entraînement terminé aujourd'hui
+                    return (
+                      <div key={workout.id} className="bg-white/5 rounded-lg p-4 opacity-60">
+                        <div className="flex items-center gap-3">
+                          <IconComp size={24} />
+                          <div className="flex-1">
+                            <h3 className="font-bold">{workout.name}</h3>
+                            <p className="text-xs opacity-75 mt-1">
+                              {workout.frequency.type === 'interval' && `⏱️ Tous les ${workout.frequency.interval} jour${workout.frequency.interval > 1 ? 's' : ''}`}
+                              {workout.frequency.type === 'weekdays' && `📆 Jours de la semaine`}
+                            </p>
+                            <p className="text-sm text-green-400 mt-1">✓ Fait aujourd'hui</p>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  }
+                  
+                  // Entraînement non terminé
+                  return (
+                    <div key={workout.id} className={`${workout.color} rounded-lg p-4`}>
+                      <div className="flex items-center gap-3 mb-3">
+                        <IconComp size={24} />
+                        <div className="flex-1">
+                          <h3 className="font-bold">{workout.name}</h3>
+                          <p className="text-xs opacity-75">
+                            {workout.frequency.type === 'interval' && `⏱️ Tous les ${workout.frequency.interval} jour${workout.frequency.interval > 1 ? 's' : ''}`}
+                            {workout.frequency.type === 'weekdays' && `📆 Jours de la semaine`}
+                          </p>
+                        </div>
+                      </div>
+                      <p className="text-sm opacity-75 mb-3">
+                        {workout.exercises.length} exercice{workout.exercises.length > 1 ? 's' : ''}
+                      </p>
+                      {!activeWorkout && (
+                        <button
+                          onClick={() => startWorkout(workout.id)}
+                          className="w-full bg-white/20 hover:bg-white/30 rounded-lg p-2 font-bold transition-colors"
+                        >
+                          Commencer
+                        </button>
+                      )}
+                      {activeWorkout && activeWorkout.id === workout.id && (
+                        <div className="bg-orange-500/20 rounded-lg p-2 text-center">
+                          <p className="text-xs text-orange-300">⏸️ En pause</p>
+                        </div>
+                      )}
+                      {activeWorkout && activeWorkout.id !== workout.id && (
+                        <div className="bg-white/5 rounded-lg p-2 text-center">
+                          <p className="text-xs opacity-50">Un autre entraînement est en cours</p>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })()}
+        </div>
+        
+        {/* Cycle Rest Day */}
+        {currentStep && currentStep.type === 'rest' && (
+          <div className="bg-white/10 rounded-xl p-6">
+            <h2 className="text-xl font-bold mb-4">💪 Corps</h2>
+            {(() => {
+              if (isBodyCompletedToday) {
+                // Repos validé aujourd'hui
+                return (
+                  <div className="bg-white/5 rounded-lg p-4 opacity-60">
+                    <h3 className="text-xl font-bold mb-2">☕ {currentStep.name}</h3>
+                    <p className="text-sm text-green-400">✓ Fait aujourd'hui</p>
+                  </div>
+                );
+              }
+              
+              // Repos non validé
+              if (currentStep.optional) {
+                return (
+                  <div>
+                    <div className="bg-green-500 rounded-lg p-4">
+                      <h3 className="text-xl font-bold mb-3">☕ {currentStep.name} (Optionnel)</h3>
+                      <p className="text-sm opacity-75 mb-4">
+                        Tu peux prendre ce repos ou continuer ton cycle
+                      </p>
+                      <div className="space-y-2">
+                        <button
+                          onClick={() => handleRestDay(true)}
+                          className="w-full bg-white/20 hover:bg-white/30 rounded-lg p-3 font-bold transition-colors"
+                        >
+                          ☕ Se reposer
+                        </button>
+                        <button
+                          onClick={() => handleRestDay(false)}
+                          className="w-full bg-white/10 hover:bg-white/20 rounded-lg p-3 font-bold transition-colors"
+                        >
+                          💪 S'entraîner
+                        </button>
+                      </div>
+                    </div>
+                    {daysLate > 0 && (
+                      <div className="mt-2 text-center">
+                        <p className="text-sm text-orange-400">⚠️ {daysLate} jour{daysLate > 1 ? 's' : ''} de retard</p>
+                      </div>
+                    )}
+                  </div>
+                );
+              } else {
+                return (
+                  <div>
+                    <div className="bg-green-500 rounded-lg p-4">
+                      <h3 className="text-xl font-bold mb-3">☕ {currentStep.name}</h3>
+                      <p className="text-sm opacity-75 mb-4">
+                        Jour de repos obligatoire pour récupérer
+                      </p>
+                      <button
+                        onClick={() => handleRestDay(true)}
+                        className="w-full bg-white/20 hover:bg-white/30 rounded-lg p-3 font-bold transition-colors"
+                      >
+                        ✓ Valider le repos
+                      </button>
+                    </div>
+                    {daysLate > 0 && (
+                      <div className="mt-2 text-center">
+                        <p className="text-sm text-orange-400">⚠️ {daysLate} jour{daysLate > 1 ? 's' : ''} de retard</p>
+                      </div>
+                    )}
+                  </div>
+                );
+              }
+            })()}
+          </div>
+        )}
+        
+        {/* Today's Task - Mind */}
+        <div className="bg-white/10 rounded-xl p-6">
+          <h2 className="text-xl font-bold mb-4">🧠 Esprit</h2>
+          {!data.mindHabits || data.mindHabits.length === 0 ? (
+            <p className="text-sm opacity-75">Aucune habitude créée</p>
+          ) : (
+            <div className="space-y-3">
+              {data.mindHabits.map(habit => {
+                const habitCompletedToday = isCompletedToday(habit.lastCompletedDate);
+                
+                if (habitCompletedToday) {
+                  // Habitude terminée aujourd'hui - affichage grisé
+                  return (
+                    <div key={habit.id} className="bg-white/5 rounded-lg p-4 opacity-60">
+                      <h3 className="font-bold mb-2">{habit.name}</h3>
+                      <p className="text-sm text-green-400">✓ Fait aujourd'hui</p>
+                    </div>
+                  );
+                }
+                
+                // Habitude non terminée - affichage normal avec bouton
+                return (
+                  <div key={habit.id} className={`${habit.color} rounded-lg p-4`}>
+                    <h3 className="font-bold mb-2">{habit.name}</h3>
+                    <p className="text-sm opacity-75 mb-3">
+                      {habit.type === 'reps' ? '🔢 Répétitions' : '⏱️ Chronomètre'}
+                    </p>
+                    {(() => {
+                      const habitDaysLate = getDaysLate(habit.lastCompletedDate);
+                      if (habitDaysLate > 0) {
+                        return (
+                          <p className="text-xs text-orange-400 mb-3">
+                            ⚠️ {habitDaysLate} jour{habitDaysLate > 1 ? 's' : ''} de retard
+                          </p>
+                        );
+                      }
+                      return null;
+                    })()}
+                    <button
+                      onClick={() => {
+                        setActiveHabit(habit);
+                        setHabitTimer(0); // Toujours commencer à 0
+                        setIsHabitTimerRunning(false);
+                        setRepsInput(''); // Réinitialiser l'input de reps
+                        setCurrentView('habit-execution');
+                      }}
+                      className="w-full bg-white/20 hover:bg-white/30 rounded-lg p-2 font-bold transition-colors"
+                    >
+                      Commencer
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+  
+  const renderWorkoutExecution = () => {
+    if (!activeWorkout) return null;
+    
+    const exerciseId = activeWorkout.exercises[currentExerciseIndex];
+    const exercise = getExerciseById(exerciseId);
+    
+    if (!exercise) {
+      return <div>Exercice introuvable</div>;
+    }
+    
+    return (
+      <div className="space-y-6">
+        <div className="flex items-center justify-between">
+          <button 
+            onClick={() => {
+              // Mettre en pause - juste revenir à l'accueil sans arrêter le timer
+              // Le timer continuera à tourner en arrière-plan
+              setCurrentView('dashboard');
+            }}
+            className="cursor-pointer hover:opacity-75 transition-opacity"
+          >
+            <ArrowLeft size={24} />
+          </button>
+          <h1 className="text-xl font-bold">{activeWorkout.name}</h1>
+          <div className="flex gap-2">
+            <button 
+              onClick={() => setShowOverview(!showOverview)}
+              className="cursor-pointer hover:opacity-75 transition-opacity"
+            >
+              {showOverview ? <ChevronUp size={24} /> : <ChevronDown size={24} />}
+            </button>
+            <button 
+              onClick={() => setShowAbandonWorkoutConfirm(true)}
+              className="text-red-400 cursor-pointer hover:opacity-75 transition-opacity"
+              title="Abandonner l'entraînement"
+            >
+              <X size={24} />
+            </button>
+          </div>
+        </div>
+        
+        {showOverview && (
+          <div className="bg-white/10 rounded-xl p-4">
+            <p className="text-sm font-bold mb-2">Progression</p>
+            <div className="space-y-1">
+              {activeWorkout.exercises.map((exId, idx) => {
+                const ex = getExerciseById(exId);
+                const uniqueKey = `${exId}-${idx}`;
+                return (
+                  <div key={idx} className={`flex items-center gap-2 text-sm ${
+                    idx === currentExerciseIndex ? 'text-blue-400 font-bold' : 
+                    exerciseData[uniqueKey]?.completed ? 'text-green-400' : 'opacity-50'
+                  }`}>
+                    {exerciseData[uniqueKey]?.completed ? <CheckCircle size={16} /> : <div className="w-4 h-4 rounded-full border-2" />}
+                    <span>{ex?.name || 'Inconnu'}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+        
+        <div className="bg-white/10 rounded-xl p-6">
+          {isInRestPeriod ? (
+            <div className="text-center">
+              <h2 className="text-2xl font-bold mb-4">⏸️ Repos</h2>
+              <div className="text-6xl font-bold mb-4">{formatTime(timer)}</div>
+              <p className="text-sm opacity-75 mb-6">Prochain : {exercise.name}</p>
+              
+              <div className="flex justify-center gap-4 mb-6">
+                <button
+                  onClick={() => setIsTimerRunning(!isTimerRunning)}
+                  className="bg-blue-500 hover:bg-blue-600 rounded-lg p-4 transition-colors"
+                >
+                  {isTimerRunning ? <Pause size={32} /> : <Play size={32} />}
+                </button>
+                <button
+                  onClick={() => {
+                    const restTime = activeWorkout.restBetweenExercises[currentExerciseIndex - 1] || 60;
+                    setTimer(restTime);
+                    setIsTimerRunning(false);
+                  }}
+                  className="bg-white/10 hover:bg-white/20 rounded-lg p-4 transition-colors"
+                >
+                  <RotateCcw size={32} />
+                </button>
+              </div>
+              
+              <button
+                onClick={() => {
+                  setTimer(0);
+                  setIsTimerRunning(false);
+                  setIsInRestPeriod(false); // Sortir de la période de repos
+                }}
+                className="bg-white/10 hover:bg-white/20 rounded-lg px-6 py-3 font-bold transition-colors"
+              >
+                Passer le repos
+              </button>
+            </div>
+          ) : (
+            <div>
+              <h2 className="text-2xl font-bold mb-2">{exercise.name}</h2>
+              <p className="text-sm opacity-75 mb-4">{exercise.category}</p>
+              
+              {exercise.type === 'reps' && (
+                <div className="mb-4">
+                  <div className="bg-white/5 rounded-lg p-3 mb-3 space-y-1">
+                    <p className="text-sm opacity-75">🎯 Objectif : <span className="font-bold">{exercise.target}</span></p>
+                    {(() => {
+                      const lastPerf = getLastPerformance(activeWorkout.id, exerciseId, currentExerciseIndex);
+                      if (lastPerf && lastPerf.reps) {
+                        return (
+                          <p className="text-sm opacity-75">📊 Dernière fois : <span className="font-bold text-blue-400">{lastPerf.reps} reps</span></p>
+                        );
+                      }
+                      return null;
+                    })()}
+                  </div>
+                  <input
+                    type="number"
+                    value={repsInput}
+                    onChange={(e) => setRepsInput(e.target.value)}
+                    placeholder="Nombre de répétitions"
+                    className="w-full bg-white/10 rounded-lg p-3 text-center text-2xl font-bold"
+                  />
+                </div>
+              )}
+              
+              {exercise.type === 'chrono' && (
+                <div className="mb-4 text-center">
+                  <div className="bg-white/5 rounded-lg p-3 mb-3">
+                    <p className="text-sm opacity-75">🎯 Chronomètre libre</p>
+                    {(() => {
+                      const lastPerf = getLastPerformance(activeWorkout.id, exerciseId, currentExerciseIndex);
+                      if (lastPerf && lastPerf.duration) {
+                        return (
+                          <p className="text-sm opacity-75 mt-1">📊 Dernière fois : <span className="font-bold text-blue-400">{formatTime(lastPerf.duration)}</span></p>
+                        );
+                      }
+                      return null;
+                    })()}
+                  </div>
+                  <div className="text-6xl font-bold mb-4">{formatTime(timer)}</div>
+                  <div className="flex justify-center gap-4">
+                    <button
+                      onClick={() => setIsTimerRunning(!isTimerRunning)}
+                      className="bg-blue-500 hover:bg-blue-600 rounded-lg p-4 transition-colors"
+                    >
+                      {isTimerRunning ? <Pause size={32} /> : <Play size={32} />}
+                    </button>
+                    <button
+                      onClick={() => {
+                        setTimer(0);
+                        setIsTimerRunning(false);
+                      }}
+                      className="bg-white/10 hover:bg-white/20 rounded-lg p-4 transition-colors"
+                    >
+                      <RotateCcw size={32} />
+                    </button>
+                  </div>
+                </div>
+              )}
+              
+              {exercise.type === 'timing' && (
+                <div className="mb-4 text-center">
+                  <div className="bg-white/5 rounded-lg p-3 mb-3">
+                    <p className="text-sm opacity-75">🎯 Objectif : <span className="font-bold">{exercise.duration ? formatTime(exercise.duration) : exercise.target}</span></p>
+                    {(() => {
+                      const lastPerf = getLastPerformance(activeWorkout.id, exerciseId, currentExerciseIndex);
+                      if (lastPerf && lastPerf.duration) {
+                        return (
+                          <p className="text-sm opacity-75 mt-1">📊 Dernière fois : <span className="font-bold text-blue-400">{formatTime(lastPerf.duration)}</span></p>
+                        );
+                      }
+                      return null;
+                    })()}
+                  </div>
+                  <div className="text-6xl font-bold mb-4">{formatTime(timer)}</div>
+                  <button
+                    onClick={() => setIsTimerRunning(!isTimerRunning)}
+                    className="bg-blue-500 hover:bg-blue-600 rounded-lg p-4 transition-colors"
+                  >
+                    {isTimerRunning ? <Pause size={32} /> : <Play size={32} />}
+                  </button>
+                </div>
+              )}
+              
+              <div className="flex gap-3 mt-6">
+                <button
+                  onClick={skipExercise}
+                  className="flex-1 bg-white/10 hover:bg-white/20 rounded-lg p-3 font-bold transition-colors"
+                >
+                  Passer
+                </button>
+                <button
+                  onClick={completeExercise}
+                  className="flex-1 bg-green-500 hover:bg-green-600 rounded-lg p-3 font-bold transition-colors"
+                >
+                  Terminé
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+  
+  const renderHabitExecution = () => {
+    if (!activeHabit) return null;
+    
+    const isRepsType = activeHabit.type === 'reps';
+    const lastPerformance = getLastHabitPerformance(activeHabit.id);
+    
+    // L'habitude est créée depuis un exercice, mais elle n'a pas de lien direct
+    // On va stocker le target directement dans l'habitude lors de la création
+    const target = activeHabit.target;
+    
+    return (
+      <div className="space-y-6">
+        <div className="flex items-center justify-between">
+          <button 
+            onClick={() => {
+              if (window.confirm('Arrêter cette séance ?')) {
+                setCurrentView('dashboard');
+                setActiveHabit(null);
+              }
+            }}
+            className="cursor-pointer hover:opacity-75 transition-opacity"
+          >
+            <ArrowLeft size={24} />
+          </button>
+          <h1 className="text-xl font-bold">{activeHabit.name}</h1>
+          <div className="w-6" />
+        </div>
+        
+        <div className={`${activeHabit.color} rounded-xl p-8`}>
+          <div className="text-center">
+            {isRepsType ? (
+              // TYPE: RÉPÉTITIONS
+              <div>
+                <p className="text-sm opacity-75 mb-2">🔢 Nombre de répétitions</p>
+                {target && (
+                  <p className="text-sm text-gray-400 mb-2">🎯 Objectif : {target} reps</p>
+                )}
+                {lastPerformance && lastPerformance.reps && (
+                  <p className="text-sm text-blue-400 mb-4">📊 Dernière fois : {lastPerformance.reps} reps</p>
+                )}
+                <input
+                  type="number"
+                  value={repsInput}
+                  onChange={(e) => setRepsInput(e.target.value)}
+                  placeholder="Ex: 10"
+                  className="w-full bg-white/10 rounded-lg p-4 text-center text-4xl font-bold mb-6"
+                  autoFocus
+                />
+                <button
+                  onClick={() => {
+                    const reps = parseInt(repsInput);
+                    if (!reps || reps <= 0) {
+                      alert('Entre un nombre valide');
+                      return;
+                    }
+                    
+                    const historyEntry = {
+                      id: `history-${Date.now()}`,
+                      type: 'mind',
+                      habitId: activeHabit.id,
+                      habitName: activeHabit.name,
+                      date: new Date().toISOString(),
+                      reps: reps,
+                      feeling: ''
+                    };
+                    
+                    setData(prev => ({
+                      ...prev,
+                      history: [...prev.history, historyEntry],
+                      mindHabits: prev.mindHabits.map(h =>
+                        h.id === activeHabit.id
+                          ? { ...h, lastCompletedDate: new Date().toISOString() }
+                          : h
+                      )
+                    }));
+                    
+                    alert('🎉 Séance validée !');
+                    setCurrentView('dashboard');
+                    setActiveHabit(null);
+                    setRepsInput('');
+                  }}
+                  className="w-full bg-white/20 hover:bg-white/30 rounded-lg px-6 py-3 font-bold transition-colors"
+                >
+                  Valider
+                </button>
+              </div>
+            ) : (
+              // TYPE: CHRONOMÈTRE
+              <div>
+                {target && (
+                  <p className="text-sm text-gray-400 mb-2">🎯 Objectif : {formatTime(parseInt(target) * 60)}</p>
+                )}
+                {lastPerformance && lastPerformance.duration && (
+                  <p className="text-sm text-blue-400 mb-4">📊 Dernière fois : {formatTime(lastPerformance.duration)}</p>
+                )}
+                <div className="text-7xl font-bold mb-6">{formatTime(habitTimer)}</div>
+                
+                <div className="flex justify-center gap-4 mb-6">
+                  <button
+                    onClick={() => setIsHabitTimerRunning(!isHabitTimerRunning)}
+                    className="bg-white/20 hover:bg-white/30 rounded-full p-6 transition-colors"
+                  >
+                    {isHabitTimerRunning ? <Pause size={40} /> : <Play size={40} />}
+                  </button>
+                  <button
+                    onClick={() => {
+                      setHabitTimer(0);
+                      setIsHabitTimerRunning(false);
+                    }}
+                    className="bg-white/20 hover:bg-white/30 rounded-full p-6 transition-colors"
+                  >
+                    <RotateCcw size={40} />
+                  </button>
+                </div>
+                
+                <button
+                  onClick={() => {
+                    const historyEntry = {
+                      id: `history-${Date.now()}`,
+                      type: 'mind',
+                      habitId: activeHabit.id,
+                      habitName: activeHabit.name,
+                      date: new Date().toISOString(),
+                      duration: habitTimer,
+                      feeling: ''
+                    };
+                    
+                    setData(prev => ({
+                      ...prev,
+                      history: [...prev.history, historyEntry],
+                      mindHabits: prev.mindHabits.map(h =>
+                        h.id === activeHabit.id
+                          ? { ...h, lastCompletedDate: new Date().toISOString() }
+                          : h
+                      )
+                    }));
+                    
+                    alert('🎉 Séance validée !');
+                    setCurrentView('dashboard');
+                    setActiveHabit(null);
+                  }}
+                  className="w-full bg-white/20 hover:bg-white/30 rounded-lg px-6 py-3 font-bold transition-colors"
+                >
+                  Terminer la séance
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+  
+  const renderHistory = () => {
+    return (
+      <div className="space-y-6">
+        <div className="flex items-center justify-between">
+          <h1 className="text-2xl font-bold">Historique</h1>
+          <button 
+            onClick={() => setCurrentView('dashboard')}
+            className="cursor-pointer hover:opacity-75 transition-opacity"
+          >
+            <ArrowLeft size={24} />
+          </button>
+        </div>
+        
+        {/* Stats */}
+        <div className="bg-white/10 rounded-xl p-4">
+          <h3 className="font-bold mb-3">📊 Statistiques</h3>
+          <div className="space-y-2 text-sm">
+            <div className="flex justify-between">
+              <span>Séances totales</span>
+              <span className="font-bold">{data.history.length}</span>
+            </div>
+            <div className="flex justify-between">
+              <span>Corps</span>
+              <span className="font-bold">{data.history.filter(h => h.type === 'body').length}</span>
+            </div>
+            <div className="flex justify-between">
+              <span>Esprit</span>
+              <span className="font-bold">{data.history.filter(h => h.type === 'mind').length}</span>
+            </div>
+          </div>
+        </div>
+        
+        {data.history.length === 0 ? (
+          <div className="bg-white/10 rounded-xl p-8 text-center">
+            <p className="opacity-75">Aucune séance enregistrée</p>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {[...data.history].reverse().map(entry => (
+              <div key={entry.id} className="bg-white/10 rounded-xl p-4">
+                <div className="flex justify-between items-start mb-2">
+                  <div className="flex-1">
+                    <h3 className="font-bold">{entry.workoutName || entry.habitName}</h3>
+                    <p className="text-sm opacity-75">{entry.type === 'body' ? '💪 Corps' : '🧠 Esprit'}</p>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <div className="text-right">
+                      <p className="text-sm opacity-75">
+                        {new Date(entry.date).toLocaleDateString('fr-FR', { 
+                          weekday: 'short', 
+                          day: '2-digit', 
+                          month: 'short'
+                        })}
+                      </p>
+                      <p className="text-xs opacity-60">
+                        {new Date(entry.date).toLocaleTimeString('fr-FR', {
+                          hour: '2-digit',
+                          minute: '2-digit'
+                        })}
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => {
+                        setHistoryEntryToDelete(entry);
+                        setShowDeleteHistoryConfirm(true);
+                      }}
+                      className="text-red-400 hover:text-red-300 cursor-pointer"
+                    >
+                      <Trash2 size={16} />
+                    </button>
+                  </div>
+                </div>
+                {entry.duration && <p className="text-sm">⏱️ {formatTime(entry.duration)}</p>}
+                {entry.reps && <p className="text-sm">🔢 {entry.reps} répétitions</p>}
+                
+                {/* Détails des exercices pour les workouts */}
+                {entry.type === 'body' && entry.exercises && (
+                  <details className="mt-3">
+                    <summary className="text-sm opacity-75 cursor-pointer hover:opacity-100">
+                      📋 Voir les détails ({Object.keys(entry.exercises).length} exercices)
+                    </summary>
+                    <div className="mt-2 space-y-2 pl-4 border-l-2 border-white/20">
+                      {Object.keys(entry.exercises).length === 0 && (
+                        <p className="text-sm text-red-400">Aucun exercice enregistré</p>
+                      )}
+                      {Object.entries(entry.exercises)
+                        .sort(([keyA], [keyB]) => {
+                          // Trier par index (la partie après le -)
+                          const indexA = parseInt(keyA.split('-').pop());
+                          const indexB = parseInt(keyB.split('-').pop());
+                          return indexA - indexB;
+                        })
+                        .map(([uniqueKey, exerciseData]) => {
+                          // La clé est "exerciseId-index", extraire l'exerciceId
+                          const exerciseId = uniqueKey.split('-').slice(0, -1).join('-');
+                          const exercise = getExerciseById(exerciseId);
+                          
+                          // Debug : afficher même si exercice non trouvé
+                          if (!exercise) {
+                            return (
+                              <div key={uniqueKey} className="text-sm text-orange-400">
+                                <p>⚠️ Exercice introuvable (ID: {exerciseId})</p>
+                                <p className="text-xs opacity-75">
+                                  {exerciseData.reps && `${exerciseData.reps} reps`}
+                                  {exerciseData.duration && ` • ${formatTime(exerciseData.duration)}`}
+                                </p>
+                              </div>
+                            );
+                          }
+                          
+                          return (
+                            <div key={uniqueKey} className="text-sm">
+                              <p className="font-semibold">{exercise.name}</p>
+                              {exerciseData.reps && <p className="opacity-75">• {exerciseData.reps} reps</p>}
+                              {exerciseData.duration && <p className="opacity-75">• {formatTime(exerciseData.duration)}</p>}
+                            </div>
+                          );
+                        })}
+                    </div>
+                  </details>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
+  
+  const renderSettings = () => {
+    return (
+      <div className="space-y-6">
+        <div className="flex items-center justify-between">
+          <h1 className="text-2xl font-bold">⚙️ Réglages</h1>
+          <button 
+            onClick={() => setCurrentView('dashboard')}
+            className="cursor-pointer hover:opacity-75 transition-opacity"
+          >
+            <ArrowLeft size={24} />
+          </button>
+        </div>
+        
+        {/* BODY SECTION */}
+        <div className="bg-white/10 rounded-xl p-4">
+          <h3 className="font-bold mb-4 text-lg">💪 Corps</h3>
+          
+          {/* Cycle */}
+          <div className="mb-4">
+            <p className="text-sm opacity-75 mb-3">Cycle d'entraînement • Glisse pour réorganiser</p>
+            {!data.bodyCycle.sequence || data.bodyCycle.sequence.length === 0 ? (
+              <p className="text-sm opacity-50 text-center py-4">Le cycle est vide</p>
+            ) : (
+              data.bodyCycle.sequence.map((step, idx) => {
+                const isWorkout = step.type === 'workout';
+                const workout = isWorkout ? getWorkoutById(step.id) : null;
+                
+                return (
+                  <div
+                    key={idx}
+                    draggable
+                    onDragStart={() => handleCycleDragStart(idx)}
+                    onDragOver={(e) => handleCycleDragOver(e, idx)}
+                    onDragEnd={handleCycleDragEnd}
+                    className={`p-3 mb-2 rounded-lg transition-all cursor-move ${
+                      idx === data.bodyCycle.currentPosition 
+                        ? 'bg-blue-500/30 border-2 border-blue-400' 
+                        : draggedCycleIndex === idx
+                        ? 'bg-white/20 opacity-50'
+                        : 'bg-white/5 hover:bg-white/10'
+                    }`}
+                  >
+                    <div className="flex items-center gap-3">
+                      <span className="text-xl opacity-50">☰</span>
+                      <div className="flex-1">
+                        {isWorkout ? (
+                          <div className="flex items-center justify-between">
+                            <span>{workout?.name || 'Inconnu'}</span>
+                            <button
+                              onClick={() => {
+                                setEditingWorkout(step.id);
+                                setCurrentView('workout-editor');
+                              }}
+                              className="opacity-50 hover:opacity-100"
+                            >
+                              <Edit size={16} />
+                            </button>
+                          </div>
+                        ) : (
+                          <span>☕ {step.name} {step.optional && '(optionnel)'}</span>
+                        )}
+                      </div>
+                      {idx === data.bodyCycle.currentPosition && (
+                        <span className="text-xs bg-blue-500 px-2 py-1 rounded">Prochain</span>
+                      )}
+                      <button
+                        onClick={() => removeFromCycle(idx)}
+                        className="opacity-50 hover:opacity-100"
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+          
+          {/* Add buttons */}
+          <div className="space-y-2">
+            <button
+              onClick={() => setShowWorkoutSelector(true)}
+              className="w-full bg-blue-500 hover:bg-blue-600 rounded-lg p-3 font-bold transition-colors flex items-center justify-center gap-2"
+            >
+              <Plus size={20} />
+              Ajouter un entraînement au cycle
+            </button>
+            <button
+              onClick={() => setShowRestBuilder(true)}
+              className="w-full bg-green-500 hover:bg-green-600 rounded-lg p-3 font-bold transition-colors flex items-center justify-center gap-2"
+            >
+              <Plus size={20} />
+              Ajouter un jour de repos
+            </button>
+          </div>
+          
+          {/* Workout library */}
+          <div className="mt-6 pt-4 border-t border-white/20">
+            <h4 className="font-bold mb-3">Mes entraînements</h4>
+            {!data.workouts || data.workouts.length === 0 ? (
+              <p className="text-sm opacity-50 text-center py-4">Aucun entraînement créé</p>
+            ) : (
+              <div className="space-y-2">
+                {data.workouts.map(workout => (
+                  <div key={workout.id} className="bg-white/5 rounded-lg p-3 flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      {(() => {
+                        const IconComp = getIconComponent(workout.icon);
+                        return <IconComp size={20} />;
+                      })()}
+                      <span>{workout.name}</span>
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => {
+                          setEditingWorkout(workout.id);
+                          setCurrentView('workout-editor');
+                        }}
+                        className="opacity-50 hover:opacity-100"
+                      >
+                        <Edit size={16} />
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setWorkoutToDelete(workout);
+                          setShowDeleteWorkoutConfirm(true);
+                        }}
+                        className="opacity-50 hover:opacity-100 text-red-400 cursor-pointer"
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            <button
+              onClick={createNewWorkout}
+              className="w-full mt-3 bg-white/10 hover:bg-white/20 rounded-lg p-3 font-bold transition-colors flex items-center justify-center gap-2"
+            >
+              <Plus size={20} />
+              Créer un entraînement
+            </button>
+          </div>
+          
+          {/* Exercise library link */}
+          <button
+            onClick={() => setCurrentView('library')}
+            className="w-full mt-4 bg-white/10 hover:bg-white/20 rounded-xl p-4 transition-colors"
+          >
+            <div className="flex items-center justify-between">
+              <span className="font-bold">📚 Bibliothèque d'exercices physiques</span>
+              <span className="text-sm opacity-75">{data.exercises?.length || 0} exercices</span>
+            </div>
+          </button>
+        </div>
+        
+        {/* MIND SECTION */}
+        <div className="bg-white/10 rounded-xl p-4">
+          <h3 className="font-bold mb-4 text-lg flex items-center gap-2">
+            <Brain size={20} />
+            Esprit
+          </h3>
+          
+          {/* Mind habits */}
+          <div className="mb-4">
+            <h4 className="font-bold mb-3">Mes habitudes</h4>
+            
+            {/* Dropdown pour ajouter une habitude */}
+            {data.mindExercises && data.mindExercises.length > 0 && (
+              <div className="mb-3">
+                <select
+                  onChange={(e) => {
+                    if (e.target.value) {
+                      createHabitFromExercise(e.target.value);
+                      e.target.value = ''; // Reset
+                    }
+                  }}
+                  className="w-full bg-purple-500/20 hover:bg-purple-500/30 rounded-lg p-3 text-white font-bold cursor-pointer transition-colors"
+                >
+                  <option value="" className="bg-gray-800 text-white">+ Ajouter une habitude depuis un exercice</option>
+                  {data.mindExercises.map(exercise => (
+                    <option key={exercise.id} value={exercise.id} className="bg-gray-800 text-white">
+                      {exercise.name} ({exercise.type === 'reps' ? 'Répétitions' : 'Chronomètre'})
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+            
+            {!data.mindHabits || data.mindHabits.length === 0 ? (
+              <p className="text-sm opacity-50 text-center py-4">Aucune habitude créée</p>
+            ) : (
+              data.mindHabits.map(habit => (
+                <div key={habit.id} className="bg-white/5 p-3 rounded-lg mb-2">
+                  <div className="flex justify-between items-center mb-2">
+                    <span className="font-semibold">{habit.name}</span>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setEditingHabit(habit);
+                          setShowEditHabitModal(true);
+                        }}
+                        className="opacity-50 hover:opacity-100 cursor-pointer"
+                      >
+                        <Edit size={16} />
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setHabitToDelete(habit);
+                          setShowDeleteHabitConfirm(true);
+                        }}
+                        className="text-red-400 hover:text-red-300 cursor-pointer"
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    </div>
+                  </div>
+                  <p className="text-xs opacity-75">
+                    {habit.type === 'reps' ? '🔢 Répétitions' : '⏱️ Chronomètre'}
+                  </p>
+                  {habit.target && (
+                    <p className="text-xs text-gray-400 mt-1">
+                      🎯 {habit.type === 'reps' ? `${habit.target} reps` : `${habit.target} min`}
+                    </p>
+                  )}
+                </div>
+              ))
+            )}
+          </div>
+          
+          {/* Mind exercise library link */}
+          <button
+            onClick={() => setCurrentView('mind-library')}
+            className="w-full bg-white/10 hover:bg-white/20 rounded-xl p-4 transition-colors"
+          >
+            <div className="flex items-center justify-between">
+              <span className="font-bold">📚 Bibliothèque d'exercices Esprit</span>
+              <span className="text-sm opacity-75">{data.mindExercises?.length || 0} exercices</span>
+            </div>
+          </button>
+        </div>
+      </div>
+    );
+  };
+  
+  const renderLibrary = () => {
+    return (
+      <div className="space-y-6">
+        <div className="flex items-center justify-between">
+          <h1 className="text-2xl font-bold">📚 Exercices Physiques</h1>
+          <button 
+            onClick={() => setCurrentView('settings')}
+            className="cursor-pointer hover:opacity-75 transition-opacity"
+          >
+            <ArrowLeft size={24} />
+          </button>
+        </div>
+        
+        {!data.exercises || data.exercises.length === 0 ? (
+          <div className="bg-white/10 rounded-xl p-8 text-center">
+            <p className="opacity-75 mb-4">Aucun exercice créé</p>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {data.exercises.map(exercise => (
+              <div key={exercise.id} className="bg-white/10 rounded-xl p-4">
+                <div className="flex justify-between items-start mb-2">
+                  <div>
+                    <h3 className="font-bold">{exercise.name}</h3>
+                    <p className="text-sm opacity-75">{exercise.category} • {exercise.type}</p>
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => openExerciseBuilder(exercise)}
+                      className="opacity-50 hover:opacity-100"
+                    >
+                      <Edit size={16} />
+                    </button>
+                    <button
+                      onClick={() => deleteExercise(exercise.id)}
+                      className="opacity-50 hover:opacity-100 text-red-400"
+                    >
+                      <Trash2 size={16} />
+                    </button>
+                  </div>
+                </div>
+                <p className="text-sm">Objectif : {exercise.target}</p>
+                {exercise.type === 'timing' && exercise.duration && (
+                  <p className="text-sm opacity-75">Durée : {formatTime(exercise.duration)}</p>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+        
+        <button
+          onClick={() => openExerciseBuilder()}
+          className="w-full bg-blue-500 hover:bg-blue-600 rounded-lg p-4 font-bold transition-colors flex items-center justify-center gap-2"
+        >
+          <Plus size={20} />
+          Créer un exercice
+        </button>
+      </div>
+    );
+  };
+  
+  const renderMindLibrary = () => {
+    return (
+      <div className="space-y-6">
+        <div className="flex items-center justify-between">
+          <h1 className="text-2xl font-bold">📚 Exercices Esprit</h1>
+          <button 
+            onClick={() => setCurrentView('settings')}
+            className="cursor-pointer hover:opacity-75 transition-opacity"
+          >
+            <ArrowLeft size={24} />
+          </button>
+        </div>
+        
+        {!data.mindExercises || data.mindExercises.length === 0 ? (
+          <div className="bg-white/10 rounded-xl p-8 text-center">
+            <p className="opacity-75 mb-4">Aucun exercice créé</p>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {data.mindExercises.map(exercise => (
+              <div 
+                key={exercise.id} 
+                className="bg-white/10 rounded-xl p-4"
+              >
+                <div className="flex justify-between items-start">
+                  <div>
+                    <h3 className="font-bold">{exercise.name}</h3>
+                    <p className="text-sm opacity-75">
+                      {exercise.type === 'reps' ? '🔢 Répétitions' : '⏱️ Chronomètre'}
+                    </p>
+                    {exercise.target && (
+                      <p className="text-sm text-gray-400 mt-1">
+                        🎯 Objectif : {exercise.type === 'reps' 
+                          ? `${exercise.target} reps` 
+                          : `${exercise.target} min`}
+                      </p>
+                    )}
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => openMindExerciseBuilder(exercise)}
+                      className="opacity-50 hover:opacity-100"
+                    >
+                      <Edit size={16} />
+                    </button>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setMindExerciseToDelete(exercise);
+                        setShowDeleteMindExerciseConfirm(true);
+                      }}
+                      className="opacity-50 hover:opacity-100 text-red-400 cursor-pointer"
+                    >
+                      <Trash2 size={16} />
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        
+        <button
+          onClick={() => openMindExerciseBuilder()}
+          className="w-full bg-purple-500 hover:bg-purple-600 rounded-lg p-4 font-bold transition-colors flex items-center justify-center gap-2"
+        >
+          <Plus size={20} />
+          Créer un exercice
+        </button>
+      </div>
+    );
+  };
+  
+  const renderWorkoutEditor = () => {
+    const workout = getWorkoutById(editingWorkout);
+    if (!workout) return <div>Entraînement introuvable</div>;
+    
+    return (
+      <div className="space-y-6">
+        <div className="flex items-center justify-between">
+          <button 
+            onClick={() => setCurrentView('settings')}
+            className="cursor-pointer hover:opacity-75 transition-opacity"
+          >
+            <ArrowLeft size={24} />
+          </button>
+          <h1 className="text-xl font-bold">Éditer</h1>
+          <button 
+            onClick={() => {
+              setWorkoutToDelete(workout);
+              setShowDeleteWorkoutConfirm(true);
+            }} 
+            className="text-red-400 cursor-pointer hover:opacity-75 transition-opacity"
+          >
+            <Trash2 size={20} />
+          </button>
+        </div>
+        
+        {/* Workout info */}
+        <div className="bg-white/10 rounded-xl p-4 space-y-4">
+          <div>
+            <label className="text-sm opacity-75 block mb-2">Nom</label>
+            <input
+              type="text"
+              value={workout.name}
+              onChange={(e) => {
+                setData(prev => ({
+                  ...prev,
+                  workouts: prev.workouts.map(w =>
+                    w.id === editingWorkout ? { ...w, name: e.target.value } : w
+                  )
+                }));
+              }}
+              className="w-full bg-white/10 rounded-lg p-3"
+            />
+          </div>
+          
+          {/* Toggle pour personnalisation */}
+          <button
+            onClick={() => setShowWorkoutCustomization(!showWorkoutCustomization)}
+            className="w-full flex items-center justify-between bg-white/5 hover:bg-white/10 rounded-lg p-3 transition-colors"
+          >
+            <span className="font-semibold">🎨 Personnaliser (icône & couleur)</span>
+            {showWorkoutCustomization ? <ChevronUp size={20} /> : <ChevronDown size={20} />}
+          </button>
+          
+          {showWorkoutCustomization && (
+            <>
+              <div>
+                <label className="text-sm opacity-75 block mb-2">Icône</label>
+                <div className="grid grid-cols-3 gap-2">
+                  {availableIcons.map(iconObj => {
+                    const IconComp = iconObj.icon;
+                    return (
+                      <button
+                        key={iconObj.name}
+                        onClick={() => {
+                          setData(prev => ({
+                            ...prev,
+                            workouts: prev.workouts.map(w =>
+                              w.id === editingWorkout ? { ...w, icon: iconObj.name } : w
+                            )
+                          }));
+                        }}
+                        className={`p-3 rounded-lg transition-colors ${
+                          workout.icon === iconObj.name
+                            ? 'bg-blue-500'
+                            : 'bg-white/10 hover:bg-white/20'
+                        }`}
+                      >
+                        <IconComp size={24} className="mx-auto" />
+                        <p className="text-xs mt-1">{iconObj.label}</p>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+              
+              <div>
+                <label className="text-sm opacity-75 block mb-2">Couleur</label>
+                <div className="grid grid-cols-4 gap-2">
+                  {availableColors.map(colorObj => (
+                    <button
+                      key={colorObj.name}
+                      onClick={() => {
+                        setData(prev => ({
+                          ...prev,
+                          workouts: prev.workouts.map(w =>
+                            w.id === editingWorkout ? { ...w, color: colorObj.name } : w
+                          )
+                        }));
+                      }}
+                      className={`h-12 rounded-lg transition-all ${colorObj.name} ${
+                        workout.color === colorObj.name
+                          ? 'ring-4 ring-white/50'
+                          : 'opacity-50 hover:opacity-100'
+                      }`}
+                />
+              ))}
+            </div>
+          </div>
+            </>
+          )}
+        </div>
+        
+        {/* Fréquence */}
+        <div className="bg-white/10 rounded-xl p-4 space-y-4">
+          <h3 className="font-bold">📅 Fréquence</h3>
+          
+          <div>
+            <label className="text-sm opacity-75 block mb-2">Type</label>
+            <select
+              value={workout.frequency?.type || 'cycle'}
+              onChange={(e) => {
+                setData(prev => ({
+                  ...prev,
+                  workouts: prev.workouts.map(w =>
+                    w.id === editingWorkout ? {
+                      ...w,
+                      frequency: {
+                        ...w.frequency,
+                        type: e.target.value,
+                        interval: e.target.value === 'interval' ? 1 : null,
+                        weekdays: e.target.value === 'weekdays' ? [] : []
+                      }
+                    } : w
+                  )
+                }));
+              }}
+              className="w-full bg-white/10 rounded-lg p-3 text-white"
+            >
+              <option value="cycle" className="bg-gray-800 text-white">🔄 Cycle rotatif</option>
+              <option value="interval" className="bg-gray-800 text-white">⏱️ Récurrence (tous les X jours)</option>
+              <option value="weekdays" className="bg-gray-800 text-white">📆 Jours de la semaine</option>
+            </select>
+          </div>
+          
+          {workout.frequency?.type === 'interval' && (
+            <div>
+              <label className="text-sm opacity-75 block mb-2">Tous les</label>
+              <select
+                value={workout.frequency?.interval || 1}
+                onChange={(e) => {
+                  setData(prev => ({
+                    ...prev,
+                    workouts: prev.workouts.map(w =>
+                      w.id === editingWorkout ? {
+                        ...w,
+                        frequency: { ...w.frequency, interval: parseInt(e.target.value) }
+                      } : w
+                    )
+                  }));
+                }}
+                className="w-full bg-white/10 rounded-lg p-3 text-white"
+              >
+                <option value="1" className="bg-gray-800 text-white">Tous les jours</option>
+                <option value="2" className="bg-gray-800 text-white">Tous les 2 jours</option>
+                <option value="3" className="bg-gray-800 text-white">Tous les 3 jours</option>
+                <option value="4" className="bg-gray-800 text-white">Tous les 4 jours</option>
+                <option value="5" className="bg-gray-800 text-white">Tous les 5 jours</option>
+                <option value="6" className="bg-gray-800 text-white">Tous les 6 jours</option>
+                <option value="7" className="bg-gray-800 text-white">Toutes les semaines</option>
+              </select>
+            </div>
+          )}
+          
+          {workout.frequency?.type === 'weekdays' && (
+            <div>
+              <label className="text-sm opacity-75 block mb-2">Jours de la semaine</label>
+              <div className="grid grid-cols-7 gap-1">
+                {['D', 'L', 'M', 'M', 'J', 'V', 'S'].map((day, idx) => {
+                  const isSelected = workout.frequency?.weekdays?.includes(idx);
+                  return (
+                    <button
+                      key={idx}
+                      onClick={() => {
+                        setData(prev => ({
+                          ...prev,
+                          workouts: prev.workouts.map(w =>
+                            w.id === editingWorkout ? {
+                              ...w,
+                              frequency: {
+                                ...w.frequency,
+                                weekdays: isSelected
+                                  ? w.frequency.weekdays.filter(d => d !== idx)
+                                  : [...(w.frequency.weekdays || []), idx].sort()
+                              }
+                            } : w
+                          )
+                        }));
+                      }}
+                      className={`p-2 rounded-lg font-bold transition-colors ${
+                        isSelected
+                          ? 'bg-blue-500 text-white'
+                          : 'bg-white/10 hover:bg-white/20'
+                      }`}
+                    >
+                      {day}
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="text-xs opacity-75 mt-2">
+                {workout.frequency?.weekdays?.length === 0 && 'Sélectionne au moins un jour'}
+                {workout.frequency?.weekdays?.length === 1 && '1 jour sélectionné'}
+                {workout.frequency?.weekdays?.length > 1 && `${workout.frequency.weekdays.length} jours sélectionnés`}
+              </p>
+            </div>
+          )}
+          
+          {workout.frequency?.type === 'cycle' && (
+            <p className="text-sm opacity-75">
+              Cet entraînement fait partie du cycle rotatif. Il apparaîtra dans l'ordre défini dans les réglages.
+            </p>
+          )}
+        </div>
+        
+        {/* Exercise list */}
+        <div className="bg-white/10 rounded-xl p-4">
+          <h3 className="font-bold mb-3">Exercices ({workout.exercises.length})</h3>
+          
+          {workout.exercises.length === 0 ? (
+            <p className="text-sm opacity-50 text-center py-4">Aucun exercice ajouté</p>
+          ) : (
+            <div className="space-y-2">
+              {workout.exercises.map((exId, idx) => {
+                const exercise = getExerciseById(exId);
+                if (!exercise) return null;
+                
+                return (
+                  <div
+                    key={idx}
+                    draggable
+                    onDragStart={() => handleExerciseDragStart(idx)}
+                    onDragOver={(e) => handleExerciseDragOver(e, idx)}
+                    onDragEnd={handleExerciseDragEnd}
+                    className={`p-3 rounded-lg transition-all cursor-move ${
+                      draggedExerciseIndex === idx
+                        ? 'bg-white/20 opacity-50'
+                        : 'bg-white/5 hover:bg-white/10'
+                    }`}
+                  >
+                    <div className="flex items-center gap-3">
+                      <span className="text-xl opacity-50">☰</span>
+                      <div className="flex-1">
+                        <p className="font-semibold">{exercise.name}</p>
+                        <p className="text-xs opacity-75">{exercise.target}</p>
+                      </div>
+                      <div className="flex gap-2 items-center">
+                        <button
+                          onClick={() => setEditingExerciseRest({ workoutId: workout.id, exerciseIndex: idx })}
+                          className="text-xs bg-white/10 px-2 py-1 rounded"
+                        >
+                          Repos: {workout.restBetweenExercises[idx] || 60}s
+                        </button>
+                        <button
+                          onClick={() => {
+                            setData(prev => ({
+                              ...prev,
+                              workouts: prev.workouts.map(w =>
+                                w.id === editingWorkout
+                                  ? { ...w, exercises: w.exercises.filter((_, i) => i !== idx) }
+                                  : w
+                              )
+                            }));
+                          }}
+                          className="opacity-50 hover:opacity-100 text-red-400"
+                        >
+                          <Trash2 size={16} />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          
+          {/* Add exercise from library */}
+          <div className="mt-4 pt-4 border-t border-white/20">
+            <p className="text-sm font-bold mb-2">Ajouter un exercice</p>
+            {!data.exercises || data.exercises.length === 0 ? (
+              <p className="text-sm opacity-50 text-center py-2">
+                Aucun exercice dans la bibliothèque
+              </p>
+            ) : (
+              <>
+                {/* Filtres */}
+                <div className="space-y-2 mb-3">
+                  <input
+                    type="text"
+                    placeholder="🔍 Rechercher un exercice..."
+                    value={exerciseFilterInEditor.search}
+                    onChange={(e) => setExerciseFilterInEditor({ ...exerciseFilterInEditor, search: e.target.value })}
+                    className="w-full bg-white/10 rounded-lg p-2 text-sm"
+                  />
+                  <select
+                    value={exerciseFilterInEditor.category}
+                    onChange={(e) => setExerciseFilterInEditor({ ...exerciseFilterInEditor, category: e.target.value })}
+                    className="w-full bg-white/10 rounded-lg p-2 text-sm text-white"
+                  >
+                    <option value="all" className="bg-gray-800 text-white">📂 Toutes les catégories</option>
+                    <option value="Renforcement" className="bg-gray-800 text-white">💪 Renforcement</option>
+                    <option value="Cardio" className="bg-gray-800 text-white">❤️ Cardio</option>
+                    <option value="Mobilité" className="bg-gray-800 text-white">🤸 Mobilité</option>
+                    <option value="Souplesse" className="bg-gray-800 text-white">🧘 Souplesse</option>
+                  </select>
+                </div>
+                
+                <div className="space-y-1 max-h-60 overflow-y-auto">
+                  {data.exercises
+                    .filter(exercise => {
+                      const matchesCategory = exerciseFilterInEditor.category === 'all' || exercise.category === exerciseFilterInEditor.category;
+                      const matchesSearch = exercise.name.toLowerCase().includes(exerciseFilterInEditor.search.toLowerCase());
+                      return matchesCategory && matchesSearch;
+                    })
+                    .map(exercise => (
+                      <button
+                        key={exercise.id}
+                        onClick={() => {
+                          setData(prev => ({
+                            ...prev,
+                            workouts: prev.workouts.map(w =>
+                              w.id === editingWorkout
+                                ? { ...w, exercises: [...w.exercises, exercise.id] }
+                                : w
+                            )
+                          }));
+                        }}
+                        className="w-full text-left bg-white/5 hover:bg-white/10 rounded-lg p-2 transition-colors"
+                      >
+                        <p className="font-semibold text-sm">{exercise.name}</p>
+                        <p className="text-xs opacity-75">{exercise.category}</p>
+                      </button>
+                    ))}
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // ============================================
+  // MODALS
+  // ============================================
+  
+  const renderExerciseBuilderModal = () => {
+    if (!showExerciseBuilder) return null;
+    
+    return (
+      <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+        <div className="bg-gray-900 rounded-xl p-6 max-w-md w-full space-y-4">
+          <div className="flex justify-between items-center">
+            <h2 className="text-xl font-bold">
+              {editExercise ? 'Modifier l\'exercice' : 'Nouvel exercice'}
+            </h2>
+            <button 
+              onClick={() => setShowExerciseBuilder(false)}
+              className="cursor-pointer hover:opacity-75 transition-opacity"
+            >
+              <X size={24} />
+            </button>
+          </div>
+          
+          <div>
+            <label className="text-sm opacity-75 block mb-2">Nom *</label>
+            <input
+              type="text"
+              value={exerciseFormData.name}
+              onChange={(e) => setExerciseFormData({ ...exerciseFormData, name: e.target.value })}
+              className="w-full bg-white/10 rounded-lg p-3"
+              placeholder="Ex: Squats"
+            />
+          </div>
+          
+          <div>
+            <label className="text-sm opacity-75 block mb-2">Catégorie</label>
+            <select
+              value={exerciseFormData.category}
+              onChange={(e) => setExerciseFormData({ ...exerciseFormData, category: e.target.value })}
+              className="w-full bg-white/10 rounded-lg p-3 text-white"
+            >
+              <option value="Renforcement" className="bg-gray-800 text-white">Renforcement</option>
+              <option value="Cardio" className="bg-gray-800 text-white">Cardio</option>
+              <option value="Mobilité" className="bg-gray-800 text-white">Mobilité</option>
+              <option value="Souplesse" className="bg-gray-800 text-white">Souplesse</option>
+            </select>
+          </div>
+          
+          <div>
+            <label className="text-sm opacity-75 block mb-2">Type</label>
+            <select
+              value={exerciseFormData.type}
+              onChange={(e) => setExerciseFormData({ ...exerciseFormData, type: e.target.value })}
+              className="w-full bg-white/10 rounded-lg p-3 text-white"
+            >
+              <option value="reps" className="bg-gray-800 text-white">Répétitions</option>
+              <option value="chrono" className="bg-gray-800 text-white">Chronomètre</option>
+              <option value="timing" className="bg-gray-800 text-white">Temps fixe (secondes)</option>
+            </select>
+          </div>
+          
+          {exerciseFormData.type === 'timing' && (
+            <div>
+              <label className="text-sm opacity-75 block mb-2">Durée (secondes)</label>
+              <input
+                type="number"
+                value={exerciseFormData.duration || ''}
+                onChange={(e) => setExerciseFormData({ ...exerciseFormData, duration: parseInt(e.target.value) || 0 })}
+                className="w-full bg-white/10 rounded-lg p-3"
+                placeholder="Ex: 30, 45, 60..."
+              />
+            </div>
+          )}
+          
+          <div>
+            <label className="text-sm opacity-75 block mb-2">Objectif</label>
+            <input
+              type="text"
+              value={exerciseFormData.target}
+              onChange={(e) => setExerciseFormData({ ...exerciseFormData, target: e.target.value })}
+              className="w-full bg-white/10 rounded-lg p-3"
+              placeholder="Ex: 8-12, 30s, 2km..."
+            />
+          </div>
+          
+          <div className="flex gap-3">
+            <button
+              onClick={() => setShowExerciseBuilder(false)}
+              className="flex-1 bg-white/10 hover:bg-white/20 rounded-lg p-3 font-bold transition-colors"
+            >
+              Annuler
+            </button>
+            <button
+              onClick={saveExercise}
+              className="flex-1 bg-blue-500 hover:bg-blue-600 rounded-lg p-3 font-bold transition-colors"
+            >
+              Enregistrer
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+  
+  const renderMindExerciseBuilderModal = () => {
+    if (!showMindExerciseBuilder) return null;
+    
+    return (
+      <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+        <div className="bg-gray-900 rounded-xl p-6 max-w-md w-full space-y-4">
+          <div className="flex justify-between items-center">
+            <h2 className="text-xl font-bold">
+              {editMindExercise ? 'Modifier l\'exercice' : 'Nouvel exercice Esprit'}
+            </h2>
+            <button 
+              onClick={() => setShowMindExerciseBuilder(false)}
+              className="cursor-pointer hover:opacity-75 transition-opacity"
+            >
+              <X size={24} />
+            </button>
+          </div>
+          
+          <div>
+            <label className="text-sm opacity-75 block mb-2">Nom *</label>
+            <input
+              type="text"
+              value={mindExerciseFormData.name}
+              onChange={(e) => setMindExerciseFormData({ ...mindExerciseFormData, name: e.target.value })}
+              className="w-full bg-white/10 rounded-lg p-3"
+              placeholder="Ex: Méditation, Respiration..."
+            />
+          </div>
+          
+          <div>
+            <label className="text-sm opacity-75 block mb-2">Type *</label>
+            <select
+              value={mindExerciseFormData.type}
+              onChange={(e) => setMindExerciseFormData({ ...mindExerciseFormData, type: e.target.value, target: '' })}
+              className="w-full bg-white/10 rounded-lg p-3 text-white"
+            >
+              <option value="chrono" className="bg-gray-800 text-white">⏱️ Chronomètre (temps libre)</option>
+              <option value="reps" className="bg-gray-800 text-white">🔢 Répétitions (nombre)</option>
+            </select>
+            <p className="text-xs opacity-75 mt-2">
+              {mindExerciseFormData.type === 'chrono' 
+                ? 'Le timer part de 0 et monte. Tu arrêtes quand tu veux.' 
+                : 'Tu entres un nombre (ex: 10 respirations) et tu valides.'}
+            </p>
+          </div>
+          
+          <div>
+            <label className="text-sm opacity-75 block mb-2">
+              Objectif {mindExerciseFormData.type === 'chrono' ? '(temps en minutes)' : '(nombre de répétitions)'}
+            </label>
+            <input
+              type="number"
+              value={mindExerciseFormData.target}
+              onChange={(e) => setMindExerciseFormData({ ...mindExerciseFormData, target: e.target.value })}
+              className="w-full bg-white/10 rounded-lg p-3"
+              placeholder={mindExerciseFormData.type === 'chrono' ? 'Ex: 10' : 'Ex: 20'}
+            />
+            <p className="text-xs opacity-75 mt-2">
+              {mindExerciseFormData.type === 'chrono' 
+                ? 'Durée visée en minutes (optionnel)' 
+                : 'Nombre de répétitions visé (optionnel)'}
+            </p>
+          </div>
+          
+          <div className="flex gap-3">
+            <button
+              onClick={() => setShowMindExerciseBuilder(false)}
+              className="flex-1 bg-white/10 hover:bg-white/20 rounded-lg p-3 font-bold transition-colors"
+            >
+              Annuler
+            </button>
+            <button
+              onClick={saveMindExercise}
+              className="flex-1 bg-purple-500 hover:bg-purple-600 rounded-lg p-3 font-bold transition-colors"
+            >
+              Enregistrer
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+  
+  const renderRestBuilderModal = () => {
+    if (!showRestBuilder) return null;
+    
+    return (
+      <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+        <div className="bg-gray-900 rounded-xl p-6 max-w-md w-full space-y-4">
+          <div className="flex justify-between items-center">
+            <h2 className="text-xl font-bold">Nouveau jour de repos</h2>
+            <button 
+              onClick={() => setShowRestBuilder(false)}
+              className="cursor-pointer hover:opacity-75 transition-opacity"
+            >
+              <X size={24} />
+            </button>
+          </div>
+          
+          <div>
+            <label className="text-sm opacity-75 block mb-2">Nom</label>
+            <input
+              type="text"
+              value={restFormData.name}
+              onChange={(e) => setRestFormData({ ...restFormData, name: e.target.value })}
+              className="w-full bg-white/10 rounded-lg p-3"
+              placeholder="Ex: Repos actif"
+            />
+          </div>
+          
+          <div className="flex items-center gap-3">
+            <input
+              type="checkbox"
+              id="optional"
+              checked={restFormData.optional}
+              onChange={(e) => setRestFormData({ ...restFormData, optional: e.target.checked })}
+              className="w-5 h-5"
+            />
+            <label htmlFor="optional" className="text-sm">
+              Repos optionnel (je peux choisir de le prendre ou non)
+            </label>
+          </div>
+          
+          <div className="flex gap-3">
+            <button
+              onClick={() => {
+                setShowRestBuilder(false);
+                setRestFormData({ name: 'Repos', optional: true });
+              }}
+              className="flex-1 bg-white/10 hover:bg-white/20 rounded-lg p-3 font-bold transition-colors"
+            >
+              Annuler
+            </button>
+            <button
+              onClick={createRestDay}
+              className="flex-1 bg-green-500 hover:bg-green-600 rounded-lg p-3 font-bold transition-colors"
+            >
+              Ajouter
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+  
+  const renderWorkoutSelectorModal = () => {
+    if (!showWorkoutSelector) return null;
+    
+    const availableWorkouts = data.workouts.filter(w => 
+      !data.bodyCycle.sequence.some(s => s.type === 'workout' && s.id === w.id)
+    );
+    
+    return (
+      <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+        <div className="bg-gray-900 rounded-xl p-6 max-w-md w-full space-y-4">
+          <div className="flex justify-between items-center">
+            <h2 className="text-xl font-bold">Ajouter au cycle</h2>
+            <button 
+              onClick={() => setShowWorkoutSelector(false)}
+              className="cursor-pointer hover:opacity-75 transition-opacity"
+            >
+              <X size={24} />
+            </button>
+          </div>
+          
+          {availableWorkouts.length === 0 ? (
+            <p className="text-sm opacity-75 text-center py-4">
+              Tous les entraînements sont déjà dans le cycle
+            </p>
+          ) : (
+            <div className="space-y-2">
+              {availableWorkouts.map(workout => {
+                const IconComp = getIconComponent(workout.icon);
+                return (
+                  <button
+                    key={workout.id}
+                    onClick={() => addWorkoutToCycle(workout.id)}
+                    className="w-full bg-white/10 hover:bg-white/20 rounded-lg p-3 transition-colors flex items-center gap-3"
+                  >
+                    <IconComp size={24} />
+                    <div className="flex-1 text-left">
+                      <p className="font-bold">{workout.name}</p>
+                      <p className="text-xs opacity-75">{workout.exercises.length} exercices</p>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          
+          <button
+            onClick={() => setShowWorkoutSelector(false)}
+            className="w-full bg-white/10 hover:bg-white/20 rounded-lg p-3 font-bold transition-colors"
+          >
+            Fermer
+          </button>
+        </div>
+      </div>
+    );
+  };
+  
+  const renderExerciseRestModal = () => {
+    if (!editingExerciseRest) return null;
+    
+    const workout = getWorkoutById(editingExerciseRest.workoutId);
+    if (!workout) return null;
+    
+    const currentRest = workout.restBetweenExercises[editingExerciseRest.exerciseIndex] || 60;
+    
+    return (
+      <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+        <div className="bg-gray-900 rounded-xl p-6 max-w-md w-full space-y-4">
+          <div className="flex justify-between items-center">
+            <h2 className="text-xl font-bold">Temps de repos</h2>
+            <button 
+              onClick={() => setEditingExerciseRest(null)}
+              className="cursor-pointer hover:opacity-75 transition-opacity"
+            >
+              <X size={24} />
+            </button>
+          </div>
+          
+          <div>
+            <label className="text-sm opacity-75 block mb-2">Repos après cet exercice (secondes)</label>
+            <input
+              type="number"
+              defaultValue={currentRest}
+              onChange={(e) => {
+                const newRest = parseInt(e.target.value) || 0;
+                setData(prev => ({
+                  ...prev,
+                  workouts: prev.workouts.map(w =>
+                    w.id === editingExerciseRest.workoutId
+                      ? {
+                          ...w,
+                          restBetweenExercises: {
+                            ...w.restBetweenExercises,
+                            [editingExerciseRest.exerciseIndex]: newRest
+                          }
+                        }
+                      : w
+                  )
+                }));
+              }}
+              className="w-full bg-white/10 rounded-lg p-3"
+            />
+          </div>
+          
+          <button
+            onClick={() => setEditingExerciseRest(null)}
+            className="w-full bg-blue-500 hover:bg-blue-600 rounded-lg p-3 font-bold transition-colors"
+          >
+            OK
+          </button>
+        </div>
+      </div>
+    );
+  };
+  
+  const renderDeleteWorkoutConfirmModal = () => {
+    if (!showDeleteWorkoutConfirm || !workoutToDelete) return null;
+    
+    return (
+      <div className="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50">
+        <div className="bg-gray-900 rounded-xl p-6 max-w-md w-full space-y-4 border-2 border-red-500">
+          <div className="text-center">
+            <div className="text-6xl mb-4">🗑️</div>
+            <h2 className="text-2xl font-bold mb-2">Supprimer l'entraînement</h2>
+            <p className="text-sm opacity-75 mb-4">
+              Voulez-vous vraiment supprimer cet entraînement ?
+            </p>
+          </div>
+          
+          <div className="bg-white/10 rounded-lg p-4">
+            <p className="font-bold text-center text-lg">{workoutToDelete.name}</p>
+            <p className="text-sm text-center opacity-75 mt-2">
+              {workoutToDelete.exercises?.length || 0} exercice{(workoutToDelete.exercises?.length || 0) > 1 ? 's' : ''}
+            </p>
+          </div>
+          
+          <div className="bg-red-500/10 rounded-lg p-4 text-sm">
+            <p className="text-red-400">
+              ⚠️ Cet entraînement sera également retiré de votre cycle.
+            </p>
+          </div>
+          
+          <div className="flex gap-3">
+            <button
+              onClick={() => {
+                setShowDeleteWorkoutConfirm(false);
+                setWorkoutToDelete(null);
+              }}
+              className="flex-1 bg-white/10 hover:bg-white/20 rounded-lg p-3 font-bold transition-colors"
+            >
+              Annuler
+            </button>
+            <button
+              onClick={() => deleteWorkout(workoutToDelete.id)}
+              className="flex-1 bg-red-500 hover:bg-red-600 rounded-lg p-3 font-bold transition-colors"
+            >
+              Supprimer
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+  
+  const renderDeleteMindExerciseConfirmModal = () => {
+    if (!showDeleteMindExerciseConfirm || !mindExerciseToDelete) return null;
+    
+    return (
+      <div className="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50">
+        <div className="bg-gray-900 rounded-xl p-6 max-w-md w-full space-y-4 border-2 border-red-500">
+          <div className="text-center">
+            <div className="text-6xl mb-4">🗑️</div>
+            <h2 className="text-2xl font-bold mb-2">Supprimer l'exercice</h2>
+            <p className="text-sm opacity-75 mb-4">
+              Voulez-vous vraiment supprimer cet exercice Esprit ?
+            </p>
+          </div>
+          
+          <div className="bg-white/10 rounded-lg p-4">
+            <p className="font-bold text-center text-lg">{mindExerciseToDelete.name}</p>
+            <p className="text-sm text-center opacity-75 mt-2">
+              {mindExerciseToDelete.category}
+            </p>
+          </div>
+          
+          <div className="flex gap-3">
+            <button
+              onClick={() => {
+                setShowDeleteMindExerciseConfirm(false);
+                setMindExerciseToDelete(null);
+              }}
+              className="flex-1 bg-white/10 hover:bg-white/20 rounded-lg p-3 font-bold transition-colors"
+            >
+              Annuler
+            </button>
+            <button
+              onClick={() => deleteMindExercise(mindExerciseToDelete.id)}
+              className="flex-1 bg-red-500 hover:bg-red-600 rounded-lg p-3 font-bold transition-colors"
+            >
+              Supprimer
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+  
+  const renderDeleteHabitConfirmModal = () => {
+    if (!showDeleteHabitConfirm || !habitToDelete) return null;
+    
+    return (
+      <div className="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50">
+        <div className="bg-gray-900 rounded-xl p-6 max-w-md w-full space-y-4 border-2 border-red-500">
+          <div className="text-center">
+            <div className="text-6xl mb-4">🗑️</div>
+            <h2 className="text-2xl font-bold mb-2">Supprimer l'habitude</h2>
+            <p className="text-sm opacity-75 mb-4">
+              Voulez-vous vraiment supprimer cette habitude ?
+            </p>
+          </div>
+          
+          <div className="bg-white/10 rounded-lg p-4">
+            <p className="font-bold text-center text-lg">{habitToDelete.name}</p>
+            <p className="text-sm text-center opacity-75 mt-2">
+              {habitToDelete.type === 'reps' ? '🔢 Répétitions' : '⏱️ Chronomètre'}
+            </p>
+          </div>
+          
+          <div className="flex gap-3">
+            <button
+              onClick={() => {
+                setShowDeleteHabitConfirm(false);
+                setHabitToDelete(null);
+              }}
+              className="flex-1 bg-white/10 hover:bg-white/20 rounded-lg p-3 font-bold transition-colors"
+            >
+              Annuler
+            </button>
+            <button
+              onClick={() => {
+                setData(prev => ({
+                  ...prev,
+                  mindHabits: prev.mindHabits.filter(h => h.id !== habitToDelete.id)
+                }));
+                setShowDeleteHabitConfirm(false);
+                setHabitToDelete(null);
+              }}
+              className="flex-1 bg-red-500 hover:bg-red-600 rounded-lg p-3 font-bold transition-colors"
+            >
+              Supprimer
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+  
+  const renderEditHabitModal = () => {
+    if (!showEditHabitModal || !editingHabit) return null;
+    
+    const sourceExercise = editingHabit.sourceExerciseId 
+      ? getMindExerciseById(editingHabit.sourceExerciseId)
+      : null;
+    
+    return (
+      <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+        <div className="bg-gray-900 rounded-xl p-6 max-w-md w-full space-y-4">
+          <div className="flex justify-between items-center">
+            <h2 className="text-xl font-bold">Modifier l'habitude</h2>
+            <button 
+              onClick={() => {
+                setShowEditHabitModal(false);
+                setEditingHabit(null);
+              }}
+              className="cursor-pointer hover:opacity-75 transition-opacity"
+            >
+              <X size={24} />
+            </button>
+          </div>
+          
+          {sourceExercise && (
+            <div className="bg-blue-500/20 border border-blue-500/50 rounded-lg p-3">
+              <p className="text-sm text-blue-300">
+                🔗 Lié à l'exercice "{sourceExercise.name}"
+              </p>
+              <p className="text-xs opacity-75 mt-1">
+                Les modifications s'appliqueront aussi à l'exercice dans la bibliothèque
+              </p>
+            </div>
+          )}
+          
+          <div>
+            <label className="text-sm opacity-75 block mb-2">Nom</label>
+            <input
+              type="text"
+              value={editingHabit.name}
+              onChange={(e) => setEditingHabit({ ...editingHabit, name: e.target.value })}
+              className="w-full bg-white/10 rounded-lg p-3"
+            />
+          </div>
+          
+          <div>
+            <label className="text-sm opacity-75 block mb-2">Type</label>
+            <select
+              value={editingHabit.type}
+              onChange={(e) => setEditingHabit({ ...editingHabit, type: e.target.value, target: '' })}
+              className="w-full bg-white/10 rounded-lg p-3 text-white"
+            >
+              <option value="chrono" className="bg-gray-800 text-white">⏱️ Chronomètre</option>
+              <option value="reps" className="bg-gray-800 text-white">🔢 Répétitions</option>
+            </select>
+          </div>
+          
+          <div>
+            <label className="text-sm opacity-75 block mb-2">
+              Objectif {editingHabit.type === 'chrono' ? '(minutes)' : '(répétitions)'}
+            </label>
+            <input
+              type="number"
+              value={editingHabit.target || ''}
+              onChange={(e) => setEditingHabit({ ...editingHabit, target: e.target.value })}
+              className="w-full bg-white/10 rounded-lg p-3"
+              placeholder={editingHabit.type === 'chrono' ? 'Ex: 10' : 'Ex: 20'}
+            />
+          </div>
+          
+          <div className="flex gap-3">
+            <button
+              onClick={() => {
+                setShowEditHabitModal(false);
+                setEditingHabit(null);
+              }}
+              className="flex-1 bg-white/10 hover:bg-white/20 rounded-lg p-3 font-bold transition-colors"
+            >
+              Annuler
+            </button>
+            <button
+              onClick={() => {
+                if (!editingHabit.name.trim()) {
+                  alert('Le nom est obligatoire');
+                  return;
+                }
+                
+                setData(prev => {
+                  const newData = {
+                    ...prev,
+                    mindHabits: prev.mindHabits.map(h =>
+                      h.id === editingHabit.id ? editingHabit : h
+                    )
+                  };
+                  
+                  // Si l'habitude a un exercice source, le mettre à jour aussi
+                  if (editingHabit.sourceExerciseId) {
+                    newData.mindExercises = prev.mindExercises.map(e =>
+                      e.id === editingHabit.sourceExerciseId
+                        ? {
+                            ...e,
+                            name: editingHabit.name,
+                            type: editingHabit.type,
+                            target: editingHabit.target
+                          }
+                        : e
+                    );
+                  }
+                  
+                  return newData;
+                });
+                
+                setShowEditHabitModal(false);
+                setEditingHabit(null);
+              }}
+              className="flex-1 bg-purple-500 hover:bg-purple-600 rounded-lg p-3 font-bold transition-colors"
+            >
+              Enregistrer
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+  
+  const renderDeleteHistoryConfirmModal = () => {
+    if (!showDeleteHistoryConfirm || !historyEntryToDelete) return null;
+    
+    return (
+      <div className="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50">
+        <div className="bg-gray-900 rounded-xl p-6 max-w-md w-full space-y-4 border-2 border-red-500">
+          <div className="text-center">
+            <div className="text-6xl mb-4">🗑️</div>
+            <h2 className="text-2xl font-bold mb-2">Supprimer la séance</h2>
+            <p className="text-sm opacity-75 mb-4">
+              Voulez-vous vraiment supprimer cette séance de l'historique ?
+            </p>
+          </div>
+          
+          <div className="bg-white/10 rounded-lg p-4">
+            <p className="font-bold text-center text-lg">{historyEntryToDelete.workoutName || historyEntryToDelete.habitName}</p>
+            <p className="text-sm text-center opacity-75 mt-2">
+              {historyEntryToDelete.type === 'body' ? '💪 Corps' : '🧠 Esprit'} • {new Date(historyEntryToDelete.date).toLocaleDateString('fr-FR')}
+            </p>
+            {historyEntryToDelete.duration && (
+              <p className="text-sm text-center opacity-75 mt-1">
+                ⏱️ {formatTime(historyEntryToDelete.duration)}
+              </p>
+            )}
+          </div>
+          
+          <div className="flex gap-3">
+            <button
+              onClick={() => {
+                setShowDeleteHistoryConfirm(false);
+                setHistoryEntryToDelete(null);
+              }}
+              className="flex-1 bg-white/10 hover:bg-white/20 rounded-lg p-3 font-bold transition-colors"
+            >
+              Annuler
+            </button>
+            <button
+              onClick={() => {
+                const entry = historyEntryToDelete;
+                const wasToday = isSameDay(entry.date, new Date());
+                
+                setData(prev => {
+                  const newData = {
+                    ...prev,
+                    history: prev.history.filter(h => h.id !== entry.id)
+                  };
+                  
+                  // Si c'était une séance d'aujourd'hui, réinitialiser lastCompletedDate
+                  if (wasToday) {
+                    if (entry.type === 'body') {
+                      // Chercher la dernière séance de ce workout avant celle-ci
+                      const previousWorkoutSession = prev.history
+                        .filter(h => h.type === 'body' && h.workoutId === entry.workoutId && h.id !== entry.id)
+                        .sort((a, b) => new Date(b.date) - new Date(a.date))[0];
+                      
+                      // Mettre à jour le workout concerné
+                      newData.workouts = prev.workouts.map(w =>
+                        w.id === entry.workoutId
+                          ? {
+                              ...w,
+                              frequency: {
+                                ...w.frequency,
+                                lastCompleted: previousWorkoutSession ? previousWorkoutSession.date : null
+                              }
+                            }
+                          : w
+                      );
+                      
+                      // Si c'était un workout du cycle, mettre à jour bodyCycle aussi
+                      const workout = prev.workouts.find(w => w.id === entry.workoutId);
+                      if (workout?.frequency?.type === 'cycle') {
+                        const previousCycleSession = prev.history
+                          .filter(h => h.type === 'body' && h.id !== entry.id)
+                          .sort((a, b) => new Date(b.date) - new Date(a.date))[0];
+                        
+                        newData.bodyCycle = {
+                          ...prev.bodyCycle,
+                          lastCompletedDate: previousCycleSession ? previousCycleSession.date : null
+                        };
+                      }
+                    } else if (entry.type === 'mind') {
+                      // Chercher la dernière séance de cette habitude avant celle-ci
+                      const previousHabitSession = prev.history
+                        .filter(h => h.type === 'mind' && h.habitId === entry.habitId && h.id !== entry.id)
+                        .sort((a, b) => new Date(b.date) - new Date(a.date))[0];
+                      
+                      newData.mindHabits = prev.mindHabits.map(h =>
+                        h.id === entry.habitId
+                          ? { ...h, lastCompletedDate: previousHabitSession ? previousHabitSession.date : null }
+                          : h
+                      );
+                    }
+                  }
+                  
+                  return newData;
+                });
+                
+                setShowDeleteHistoryConfirm(false);
+                setHistoryEntryToDelete(null);
+              }}
+              className="flex-1 bg-red-500 hover:bg-red-600 rounded-lg p-3 font-bold transition-colors"
+            >
+              Supprimer
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+  
+  const renderAbandonWorkoutConfirmModal = () => {
+    if (!showAbandonWorkoutConfirm) return null;
+    
+    return (
+      <div className="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50">
+        <div className="bg-gray-900 rounded-xl p-6 max-w-md w-full space-y-4 border-2 border-red-500">
+          <div className="text-center">
+            <div className="text-6xl mb-4">⚠️</div>
+            <h2 className="text-2xl font-bold mb-2">Abandonner l'entraînement ?</h2>
+            <p className="text-sm opacity-75 mb-4">
+              Toute ta progression sera perdue
+            </p>
+          </div>
+          
+          {activeWorkout && (
+            <div className="bg-white/10 rounded-lg p-4">
+              <p className="font-bold text-center text-lg">{activeWorkout.name}</p>
+              <p className="text-sm text-center opacity-75 mt-2">
+                Exercice {currentExerciseIndex + 1}/{activeWorkout.exercises.length}
+              </p>
+            </div>
+          )}
+          
+          <div className="flex gap-3">
+            <button
+              onClick={() => setShowAbandonWorkoutConfirm(false)}
+              className="flex-1 bg-white/10 hover:bg-white/20 rounded-lg p-3 font-bold transition-colors"
+            >
+              Annuler
+            </button>
+            <button
+              onClick={() => {
+                setActiveWorkout(null);
+                setExerciseData({});
+                setCurrentExerciseIndex(0);
+                setTimer(0);
+                setIsTimerRunning(false);
+                setIsInRestPeriod(false);
+                setRepsInput('');
+                setShowAbandonWorkoutConfirm(false);
+                setCurrentView('dashboard');
+              }}
+              className="flex-1 bg-red-500 hover:bg-red-600 rounded-lg p-3 font-bold transition-colors"
+            >
+              Abandonner
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+  
+  const renderRemoveFromCycleConfirmModal = () => {
+    if (!showRemoveFromCycleConfirm || cycleIndexToRemove === null) return null;
+    
+    const step = data.bodyCycle.sequence[cycleIndexToRemove];
+    if (!step) return null;
+    
+    const isWorkout = step.type === 'workout';
+    const workout = isWorkout ? getWorkoutById(step.id) : null;
+    
+    return (
+      <div className="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50">
+        <div className="bg-gray-900 rounded-xl p-6 max-w-md w-full space-y-4 border-2 border-red-500">
+          <div className="text-center">
+            <div className="text-6xl mb-4">🗑️</div>
+            <h2 className="text-2xl font-bold mb-2">Retirer du cycle ?</h2>
+            <p className="text-sm opacity-75 mb-4">
+              Cet élément sera retiré de ton cycle d'entraînement
+            </p>
+          </div>
+          
+          <div className="bg-white/10 rounded-lg p-4">
+            <p className="font-bold text-center text-lg">
+              {isWorkout ? (workout?.name || 'Entraînement inconnu') : `☕ ${step.name}`}
+            </p>
+            {!isWorkout && step.optional && (
+              <p className="text-sm text-center opacity-75 mt-1">(optionnel)</p>
+            )}
+          </div>
+          
+          <div className="flex gap-3">
+            <button
+              onClick={() => {
+                setShowRemoveFromCycleConfirm(false);
+                setCycleIndexToRemove(null);
+              }}
+              className="flex-1 bg-white/10 hover:bg-white/20 rounded-lg p-3 font-bold transition-colors"
+            >
+              Annuler
+            </button>
+            <button
+              onClick={() => {
+                setData(prev => ({
+                  ...prev,
+                  bodyCycle: {
+                    ...prev.bodyCycle,
+                    sequence: prev.bodyCycle.sequence.filter((_, i) => i !== cycleIndexToRemove)
+                  }
+                }));
+                setShowRemoveFromCycleConfirm(false);
+                setCycleIndexToRemove(null);
+              }}
+              className="flex-1 bg-red-500 hover:bg-red-600 rounded-lg p-3 font-bold transition-colors"
+            >
+              Retirer
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // ============================================
+  // MAIN RENDER
+  // ============================================
+  
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-gray-900 via-blue-900 to-purple-900 text-white">
+      {/* Bottom Navigation */}
+      <div className="fixed bottom-0 left-0 right-0 bg-black/50 backdrop-blur-lg border-t border-white/10 z-40">
+        <div className="max-w-lg mx-auto flex justify-around p-2">
+          <button
+            onClick={() => setCurrentView('dashboard')}
+            className={`flex flex-col items-center gap-1 p-2 rounded-lg transition-colors ${
+              currentView === 'dashboard' ? 'text-blue-400' : 'text-gray-400 hover:text-white'
+            }`}
+          >
+            <Calendar size={24} />
+            <span className="text-xs">Accueil</span>
+          </button>
+          <button
+            onClick={() => setCurrentView('history')}
+            className={`flex flex-col items-center gap-1 p-2 rounded-lg transition-colors ${
+              currentView === 'history' ? 'text-blue-400' : 'text-gray-400 hover:text-white'
+            }`}
+          >
+            <TrendingUp size={24} />
+            <span className="text-xs">Historique</span>
+          </button>
+          <button
+            onClick={() => setCurrentView('settings')}
+            className={`flex flex-col items-center gap-1 p-2 rounded-lg transition-colors ${
+              currentView === 'settings' ? 'text-blue-400' : 'text-gray-400 hover:text-white'
+            }`}
+          >
+            <Settings size={24} />
+            <span className="text-xs">Réglages</span>
+          </button>
+        </div>
+      </div>
+      
+      {/* Main Content */}
+      <div className="max-w-lg mx-auto p-4 pb-24">
+        {currentView === 'dashboard' && renderDashboard()}
+        {currentView === 'workout-execution' && renderWorkoutExecution()}
+        {currentView === 'habit-execution' && renderHabitExecution()}
+        {currentView === 'history' && renderHistory()}
+        {currentView === 'settings' && renderSettings()}
+        {currentView === 'library' && renderLibrary()}
+        {currentView === 'mind-library' && renderMindLibrary()}
+        {currentView === 'workout-editor' && renderWorkoutEditor()}
+      </div>
+      
+      {/* Modals */}
+      {renderExerciseBuilderModal()}
+      {renderMindExerciseBuilderModal()}
+      {renderRestBuilderModal()}
+      {renderWorkoutSelectorModal()}
+      {renderExerciseRestModal()}
+      {renderDeleteWorkoutConfirmModal()}
+      {renderDeleteMindExerciseConfirmModal()}
+      {renderDeleteHabitConfirmModal()}
+      {renderEditHabitModal()}
+      {renderDeleteHistoryConfirmModal()}
+      {renderAbandonWorkoutConfirmModal()}
+      {renderRemoveFromCycleConfirmModal()}
+    </div>
+  );
+}
+
+// Render the app
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<PowerflowApp />);
+    </script>
+</body>
+</html>
